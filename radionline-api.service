@@ -1,0 +1,16 @@
+﻿[Unit]
+Description=RadioNet PACS FastAPI
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/var/www/radionline/backend
+Environment=PYTHONPATH=/var/www/radionline/backend
+EnvironmentFile=/var/www/radionline/backend/.env
+ExecStart=/var/www/radionline/backend/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
