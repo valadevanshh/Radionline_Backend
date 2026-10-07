@@ -71,6 +71,7 @@ class CenterBase(BaseModel):
     contactNumber: str
     address: Optional[str] = None
     headerTemplateUrl: Optional[str] = None
+    letterheadMode: Optional[str] = None
     logoUrl: Optional[str] = None
 
 class CenterCreate(CenterBase):

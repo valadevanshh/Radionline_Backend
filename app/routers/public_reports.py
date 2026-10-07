@@ -58,6 +58,8 @@ def get_public_report(token: str, response: Response, db: Session = Depends(get_
             "address": centermeta.get("address"),
             "phone": center.contact_number if center else None,
             "logoUrl": file_storage.public_url(centermeta.get("logoUrl")) if centermeta.get("logoUrl") else None,
+            "headerTemplateUrl": file_storage.public_url(centermeta.get("headerTemplateUrl")) if centermeta.get("headerTemplateUrl") else None,
+            "letterheadMode": centermeta.get("letterheadMode", "full-page"),
         },
         "patient": {
             "name": case.full_name,

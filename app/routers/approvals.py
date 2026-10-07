@@ -148,6 +148,7 @@ def _snapshot_center(center_id: str, db: Session) -> Optional[dict]:
         "contactNumber": c.contact_number,
         "address": meta.get("address"),
         "headerTemplateUrl": meta.get("headerTemplateUrl"),
+        "letterheadMode": meta.get("letterheadMode", "full-page"),
         "logoUrl": meta.get("logoUrl"),
         "createdAt": c.created_at,
     }

@@ -41,6 +41,7 @@ def db_to_schema(c: CenterDB) -> dict:
         "contactNumber": c.contact_number,
         "address": meta.get("address"),
         "headerTemplateUrl": file_storage.public_url(meta.get("headerTemplateUrl")),
+        "letterheadMode": meta.get("letterheadMode", "full-page"),
         "logoUrl": file_storage.public_url(meta.get("logoUrl")),
         "createdAt": c.created_at,
     }
@@ -66,6 +67,7 @@ class CenterProfileUpdate(BaseModel):
     email: Optional[str] = None
     address: Optional[str] = None
     headerTemplateUrl: Optional[str] = None
+    letterheadMode: Optional[str] = None
     logoUrl: Optional[str] = None
 
 
@@ -101,6 +103,10 @@ def update_center_profile(
             body.headerTemplateUrl, category="centers", entity_id=center_id,
             subfolder="header", filename_hint="header.png",
         ) if body.headerTemplateUrl else None
+    if body.letterheadMode is not None:
+        if body.letterheadMode not in ("header", "footer", "full-page", "preprinted"):
+            raise HTTPException(status_code=400, detail="Invalid letterhead placement")
+        meta["letterheadMode"] = body.letterheadMode
     if body.logoUrl is not None:
         meta["logoUrl"] = file_storage.materialize_media_reference(
             body.logoUrl, category="centers", entity_id=center_id,
@@ -159,6 +165,7 @@ def save_center_core(center_in: CenterCreate, db: Session) -> dict:
             subfolder="header",
             filename_hint="header.png",
         ),
+        "letterheadMode": center_in.letterheadMode or "full-page",
         "logoUrl": file_storage.materialize_media_reference(
             center_in.logoUrl,
             category="centers",
