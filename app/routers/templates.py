@@ -60,31 +60,12 @@ async def save_template(
     current_user: UserDB = Depends(get_current_user),
 ):
     """Create / edit a template.
-    * Super Admin, Doctor: save directly.
-    * Manager: new templates save directly; editing an existing one waits for Super Admin approval (202).
-    * Centre login: needs Templates = write for the template's centre; cannot create or edit global (ALL) templates."""
-    existing = db.query(TemplateDB).filter(TemplateDB.id == tmpl_in.id).first() if tmpl_in.id else None
-    if current_user.role == "CENTER":
-        target = (tmpl_in.centerId or "ALL")
-        if target == "ALL":
-            raise HTTPException(status_code=403, detail="Centre accounts can only save templates for their own centre")
-        access_svc.require_center_perm(db, current_user, target, "templates", "write")
-        if existing is not None:
-            access_svc.require_center_perm(db, current_user, existing.center_id, "templates", "write")
-    elif current_user.role == "MANAGER" and existing is not None:
-        try:
-            from app.routers.approvals import create_pending_approval, announce_pending_approval, pending_response
-        except ImportError:
-            from app.routers.approvals import create_pending_approval, announce_pending_approval, pending_response
-        payload = tmpl_in.model_dump() if hasattr(tmpl_in, "model_dump") else tmpl_in.dict()
-        appr = create_pending_approval(
-            db, current_user, action_type="UPDATE_TEMPLATE", entity_type="template",
-            entity_id=existing.id, payload=payload,
+    Strictly limited to doctors only."""
+    if current_user.role != "DOCTOR":
+        raise HTTPException(
+            status_code=403,
+            detail="Template creation is limited to doctors only",
         )
-        data = await announce_pending_approval(db, appr, current_user)
-        return pending_response(data, "Template edit sent to the Super Admin for approval.")
-    elif current_user.role not in ("SUPER_ADMIN", "MANAGER", "DOCTOR"):
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
     return save_template_core(tmpl_in, db)
 
 

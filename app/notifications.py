@@ -8,6 +8,7 @@ The sender is never notified. Notification failures never break the action that
 triggered them (they are logged and skipped).
 """
 import logging
+import re
 from datetime import datetime
 from typing import Iterable, List, Optional
 
@@ -44,10 +45,15 @@ def _clip(text: Optional[str], limit: int) -> str:
     return t if len(t) <= limit else t[: limit - 3].rstrip() + "..."
 
 
+_UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+
 def case_label(case: CaseDB) -> str:
     name = (case.full_name or "").strip() or "Patient"
     num = (case.patient_number or "").strip()
-    return f"{name} ({num})" if num else name
+    if num and not _UUID_RE.match(num):
+        return f"{name} ({num})"
+    return name
 
 
 def case_link(case_id: str, activity: bool = False) -> str:

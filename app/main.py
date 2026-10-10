@@ -11,7 +11,7 @@ from app.routers import notifications as notifications_router
 from app.routers import center_users, annotations
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__) # reload config
 
 # NOTE: No tables or columns are automatically created by SQLAlchemy.
 # All schema creation and DDL changes must be executed via migrations/ SQL scripts.
