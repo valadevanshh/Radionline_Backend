@@ -447,13 +447,37 @@ def get_reports(
         all_reports = db.query(ReportDB).order_by(ReportDB.created_at.desc()).all()
         reports = []
         for r in all_reports:
-            meta = r.metadata_ or {}
-            claimed_by = meta.get("claimedByDoctorId")
-            assigned_ids = meta.get("assignedDoctorIds", ["ALL"])
-            if claimed_by and str(claimed_by) in identity_keys:
-                reports.append(r)
-            elif not claimed_by and ("ALL" in assigned_ids or any(str(k) in assigned_ids for k in identity_keys)):
-                reports.append(r)
+            case = db.query(CaseDB).filter(CaseDB.id == r.id).first()
+            studies = db.query(StudyDB).filter(StudyDB.case_id == r.id).all() if case else []
+
+            claimed_by = None
+            for s in studies:
+                if s.claimed_by:
+                    claimed_by = str(s.claimed_by)
+                    break
+            if not claimed_by and case:
+                cmeta = case.metadata_ or {}
+                if cmeta.get("claimedByDoctorId"):
+                    claimed_by = str(cmeta["claimedByDoctorId"])
+            if not claimed_by:
+                rmeta = r.metadata_ or {}
+                if rmeta.get("claimedByDoctorId"):
+                    claimed_by = str(rmeta["claimedByDoctorId"])
+                elif r.assigned_doctor_id and r.assigned_doctor_id != "ALL" and r.status in ("In Review", "CLAIMED", "Completed"):
+                    claimed_by = str(r.assigned_doctor_id)
+
+            assigned_ids = (r.metadata_ or {}).get("assignedDoctorIds", ["ALL"])
+            if case:
+                assigned_ids = (case.metadata_ or {}).get("assignedDoctorIds", assigned_ids)
+
+            if claimed_by:
+                # If any doctor accepted the upload, other doctors must NOT see that data
+                if claimed_by in identity_keys:
+                    reports.append(r)
+            else:
+                # If completely unclaimed, visible if assigned to this doctor or ALL
+                if "ALL" in assigned_ids or any(str(k) in assigned_ids for k in identity_keys):
+                    reports.append(r)
     else:
         # SUPER_ADMIN, MANAGER
         reports = db.query(ReportDB).order_by(ReportDB.created_at.desc()).all()
@@ -498,8 +522,23 @@ def get_report(
         if study:
             case = db.query(CaseDB).filter(CaseDB.id == study.case_id).first()
 
-    if case and not _can_access_case(db, current_user, case):
-        raise HTTPException(status_code=403, detail="Access denied to patient report")
+    if case:
+        if not _can_access_case(db, current_user, case):
+            raise HTTPException(status_code=403, detail="Access denied to patient report")
+    else:
+        # Check ReportDB directly if no CaseDB row exists
+        rep = db.query(ReportDB).filter(ReportDB.id == report_id).first()
+        if not rep:
+            raise HTTPException(status_code=404, detail="Report not found")
+        if current_user.role == "CENTER":
+            if not access_svc.has_center_perm(db, current_user, rep.radiology_center_id, "reports", "read"):
+                raise HTTPException(status_code=403, detail="Access denied to patient report")
+        elif current_user.role == "DOCTOR":
+            identity_keys = _doctor_claim_identity_keys(db, current_user)
+            rmeta = rep.metadata_ or {}
+            claimed_by = rmeta.get("claimedByDoctorId") or rep.assigned_doctor_id
+            if claimed_by and str(claimed_by) not in identity_keys:
+                raise HTTPException(status_code=403, detail="Access denied: study accepted by another doctor")
 
     report = db.query(ReportDB).filter(ReportDB.id == report_id).first()
     if not report:
@@ -900,11 +939,17 @@ async def claim_report(
     claim_req.doctorId = str(doc_id)
     claim_req.doctorName = doctor_name
 
-    # ATOMIC CONDITIONAL UPDATE: UPDATE studies SET claimed_by = :doctor_id, status = 'CLAIMED' WHERE id = :id AND status = 'UNCLAIMED'
-    # Checked strictly via result.rowcount (NO PRIOR SELECT!)
+    target_case_id = case_ops.resolve_case_id(db, report_id) or report_id
+
+    # ATOMIC CONDITIONAL UPDATE: UPDATE studies SET claimed_by = :doctor_id, status = 'CLAIMED' WHERE (id = :id OR case_id = :target_case_id) AND status = 'UNCLAIMED'
     stmt = (
         update(StudyDB)
-        .where(and_((StudyDB.id == report_id) | (StudyDB.case_id == report_id), StudyDB.status == "UNCLAIMED"))
+        .where(
+            and_(
+                (StudyDB.id == report_id) | (StudyDB.case_id == report_id) | (StudyDB.case_id == target_case_id),
+                StudyDB.status == "UNCLAIMED"
+            )
+        )
         .values(
             claimed_by=claim_req.doctorId,
             claimed_by_name=claim_req.doctorName,
@@ -916,84 +961,112 @@ async def claim_report(
 
     if result.rowcount == 0:
         # Atomic conditional update affected 0 rows because study is already claimed or legacy ID
-        current_study = db.query(StudyDB).filter((StudyDB.id == report_id) | (StudyDB.case_id == report_id)).first()
+        current_study = db.query(StudyDB).filter(
+            (StudyDB.id == report_id) | (StudyDB.case_id == report_id) | (StudyDB.case_id == target_case_id)
+        ).first()
         if current_study and current_study.status == "CLAIMED":
-            claimant = current_study.claimed_by_name or "another doctor"
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=f"Study already claimed by {claimant}."
-            )
+            if current_study.claimed_by != claim_req.doctorId:
+                claimant = current_study.claimed_by_name or "another doctor"
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"Study already claimed by {claimant}."
+                )
 
         # Legacy ReportDB check if report_id was a legacy case ID.
-        # Row lock (SELECT ... FOR UPDATE) so two doctors cannot both pass the claim check below;
-        # it is held until the commit after this doctor's claim is written into the metadata.
-        legacy_report = db.query(ReportDB).filter(ReportDB.id == report_id).with_for_update().first()
-        if not legacy_report:
+        legacy_report = db.query(ReportDB).filter((ReportDB.id == target_case_id) | (ReportDB.id == report_id)).with_for_update().first()
+        if not legacy_report and not current_study:
             raise HTTPException(status_code=404, detail="Study not found")
 
-        meta = legacy_report.metadata_ or {}
-        if meta.get("claimStatus") == "CLAIMED" and meta.get("claimedByDoctorId") != claim_req.doctorId:
-            claimant = meta.get("claimedByDoctorName", "another doctor")
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=f"Study already claimed by {claimant}."
+        if legacy_report:
+            meta = legacy_report.metadata_ or {}
+            if meta.get("claimStatus") == "CLAIMED" and meta.get("claimedByDoctorId") != claim_req.doctorId:
+                claimant = meta.get("claimedByDoctorName", "another doctor")
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"Study already claimed by {claimant}."
+                )
+
+            legacy_stmt = (
+                update(ReportDB)
+                .where(and_((ReportDB.id == target_case_id) | (ReportDB.id == report_id), ReportDB.status != "Completed"))
+                .values(
+                    assigned_doctor_id=claim_req.doctorId,
+                    assigned_doctor_name=claim_req.doctorName,
+                    status="In Review"
+                )
             )
+            legacy_res = db.execute(legacy_stmt)
+            if legacy_res.rowcount:
+                legacy_meta = dict(legacy_report.metadata_ or {})
+                legacy_meta["claimedByDoctorId"] = claim_req.doctorId
+                legacy_meta["claimedByDoctorName"] = claim_req.doctorName
+                legacy_meta["claimStatus"] = "CLAIMED"
+                legacy_report.metadata_ = legacy_meta
+            db.commit()
 
-        # Atomic conditional update on ReportDB
-        legacy_stmt = (
-            update(ReportDB)
-            .where(and_(ReportDB.id == report_id, ReportDB.status != "Completed"))
-            .values(
-                assigned_doctor_id=claim_req.doctorId,
-                assigned_doctor_name=claim_req.doctorName,
-                status="In Review"
-            )
-        )
-        legacy_res = db.execute(legacy_stmt)
-        if legacy_res.rowcount:
-            # Record the claim while the row lock is still held (same values as the sync below)
-            legacy_meta = dict(legacy_report.metadata_ or {})
-            legacy_meta["claimedByDoctorId"] = claim_req.doctorId
-            legacy_meta["claimedByDoctorName"] = claim_req.doctorName
-            legacy_meta["claimStatus"] = "CLAIMED"
-            legacy_report.metadata_ = legacy_meta
-        db.commit()
-
-    # Single Source of Truth: Update study_notifications join table
-    db.query(StudyNotificationDB).filter(
-        and_((StudyNotificationDB.study_id == report_id), StudyNotificationDB.doctor_id == claim_req.doctorId)
-    ).update({"dismissed_reason": "accepted_self"})
-
-    db.query(StudyNotificationDB).filter(
-        and_((StudyNotificationDB.study_id == report_id), StudyNotificationDB.doctor_id != claim_req.doctorId)
-    ).update({"dismissed_reason": "accepted_other"})
-
-    db.commit()
+    # Update CaseDB metadata and status
+    case_row = db.query(CaseDB).filter((CaseDB.id == target_case_id) | (CaseDB.id == report_id)).first()
+    if case_row:
+        if case_row.status == "Pending":
+            case_row.status = "In Review"
+        cmeta = dict(case_row.metadata_ or {})
+        cmeta["claimedByDoctorId"] = claim_req.doctorId
+        cmeta["claimedByDoctorName"] = claim_req.doctorName
+        cmeta["claimStatus"] = "CLAIMED"
+        cmeta["assignedDoctorId"] = claim_req.doctorId
+        cmeta["assignedDoctorName"] = claim_req.doctorName
+        case_row.metadata_ = cmeta
+        from sqlalchemy.orm.attributes import flag_modified
+        flag_modified(case_row, "metadata_")
 
     # Sync legacy ReportDB metadata for UI compatibility
-    report = db.query(ReportDB).filter(ReportDB.id == report_id).first()
+    report = db.query(ReportDB).filter((ReportDB.id == target_case_id) | (ReportDB.id == report_id)).first()
     if report:
         report.assigned_doctor_id = claim_req.doctorId
         report.assigned_doctor_name = claim_req.doctorName
-        report.status = "In Review"
+        if report.status == "Pending":
+            report.status = "In Review"
         meta = dict(report.metadata_ or {})
         meta["claimedByDoctorId"] = claim_req.doctorId
         meta["claimedByDoctorName"] = claim_req.doctorName
         meta["claimStatus"] = "CLAIMED"
         report.metadata_ = meta
-        db.commit()
+        from sqlalchemy.orm.attributes import flag_modified
+        flag_modified(report, "metadata_")
+
+    # Update study_notifications join table: dismiss for other doctors
+    all_studies = db.query(StudyDB).filter((StudyDB.case_id == target_case_id) | (StudyDB.id == report_id)).all()
+    study_ids = [s.id for s in all_studies] or [report_id, target_case_id]
+    db.query(StudyNotificationDB).filter(
+        and_(StudyNotificationDB.study_id.in_(study_ids), StudyNotificationDB.doctor_id == claim_req.doctorId)
+    ).update({"dismissed_reason": "accepted_self"}, synchronize_session=False)
+
+    db.query(StudyNotificationDB).filter(
+        and_(StudyNotificationDB.study_id.in_(study_ids), StudyNotificationDB.doctor_id != claim_req.doctorId)
+    ).update({"dismissed_reason": "accepted_other"}, synchronize_session=False)
+
+    db.commit()
+
+    from app.routers.study_reports import case_studies_ordered, enrich_case_item
+
+    if report:
         db.refresh(report)
         updated_result = db_to_schema(report)
-
+        if case_row:
+            studies = case_studies_ordered(db, target_case_id)
+            updated_result = enrich_case_item(updated_result, case_row, studies)
     else:
-        study = db.query(StudyDB).filter((StudyDB.id == report_id) | (StudyDB.case_id == report_id)).first()
+        study = db.query(StudyDB).filter((StudyDB.id == report_id) | (StudyDB.case_id == target_case_id)).first()
         case = db.query(CaseDB).filter(CaseDB.id == study.case_id).first() if study else None
         updated_result = study_to_schema(study, case)
+        if case:
+            studies = case_studies_ordered(db, case.id)
+            updated_result = enrich_case_item(updated_result, case, studies)
 
-    # Broadcast real-time REPORT_CLAIMED event via WebSocket to all doctors
+    # Broadcast real-time REPORT_CLAIMED event via WebSocket
     await manager.broadcast({
         "type": "REPORT_CLAIMED",
-        "reportId": report_id,
+        "reportId": target_case_id,
         "claimedByDoctorId": claim_req.doctorId,
         "claimedByDoctorName": claim_req.doctorName,
         "report": updated_result

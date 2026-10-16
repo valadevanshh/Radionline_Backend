@@ -152,6 +152,8 @@ class TemplateBase(BaseModel):
     findings: Optional[str] = None
     impression: Optional[str] = None
     content: Optional[str] = None
+    doctorId: Optional[str] = None
+    doctorName: Optional[str] = None
 
 class TemplateCreate(TemplateBase):
     id: Optional[str] = None

@@ -147,7 +147,35 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
     else:
         await websocket.close(code=1008)
         return
-    await manager.connect(websocket, ws_user_id)
+
+    user_details = {
+        "userId": str(ws_user_id),
+        "role": payload.get("role"),
+        "email": payload.get("email"),
+    }
+    try:
+        from app.database import SessionLocal
+        with SessionLocal() as db:
+            from app.models import UserDB
+            u = db.query(UserDB).filter(UserDB.id == int(ws_user_id)).first() if ws_user_id and str(ws_user_id).isdigit() else None
+            if u:
+                user_details["role"] = u.role
+                user_details["email"] = u.email
+                meta = u.metadata_ or {}
+                user_details["doctorId"] = meta.get("doctorId")
+                if u.role == "CENTER":
+                    from app import access as access_svc
+                    user_details["centerIds"] = set(access_svc.linked_center_ids(db, u) or [])
+                elif u.role == "DOCTOR":
+                    from app.routers.reports import _doctor_claim_identity_keys
+                    try:
+                        user_details["doctorKeys"] = {str(k) for k in _doctor_claim_identity_keys(db, u)}
+                    except Exception:
+                        user_details["doctorKeys"] = {str(meta.get("doctorId") or "")}
+    except Exception as e:
+        logger.warning(f"Could not build websocket user details: {e}")
+
+    await manager.connect(websocket, ws_user_id, user_details)
     try:
         while True:
             # Keep connection open and receive optional messages

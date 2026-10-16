@@ -145,8 +145,32 @@ def _can_access_case(db: Session, user: UserDB, case: CaseDB) -> bool:
         except HTTPException:
             return False
         studies = _case_studies(db, case.id)
-        if any(s.claimed_by and s.claimed_by in keys for s in studies):
+
+        # Check all sources of doctor claim
+        claimed_by_keys = {str(s.claimed_by) for s in studies if s.claimed_by}
+        case_meta = case.metadata_ or {}
+        if case_meta.get("claimedByDoctorId"):
+            claimed_by_keys.add(str(case_meta["claimedByDoctorId"]))
+        rep = db.query(ReportDB).filter(ReportDB.id == case.id).first()
+        if rep:
+            rmeta = rep.metadata_ or {}
+            if rmeta.get("claimedByDoctorId"):
+                claimed_by_keys.add(str(rmeta["claimedByDoctorId"]))
+            if rep.assigned_doctor_id and rep.assigned_doctor_id != "ALL" and rep.status in ("In Review", "CLAIMED", "Completed"):
+                claimed_by_keys.add(str(rep.assigned_doctor_id))
+
+        if claimed_by_keys:
+            # If any doctor accepted/claimed the upload, only that doctor can see that data!
+            # Other doctors must not be able to see that data.
+            return bool(keys & claimed_by_keys)
+
+        # If completely unclaimed: check if this doctor is assigned or notified
+        assigned_ids = case_meta.get("assignedDoctorIds", ["ALL"])
+        if rep:
+            assigned_ids = (rep.metadata_ or {}).get("assignedDoctorIds", assigned_ids)
+        if "ALL" in assigned_ids or any(str(k) in assigned_ids for k in keys):
             return True
+
         study_ids = [s.id for s in studies]
         if study_ids:
             notif = (
@@ -157,7 +181,7 @@ def _can_access_case(db: Session, user: UserDB, case: CaseDB) -> bool:
                 )
                 .first()
             )
-            if notif:
+            if notif and notif.dismissed_reason != "accepted_other":
                 return True
         return False
     return False

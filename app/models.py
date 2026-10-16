@@ -143,6 +143,8 @@ class TemplateDB(Base):
     center_id = Column(String(100), nullable=False, default="ALL")
     center_name = Column(String(255), nullable=False, default="All Centers")
     modality = Column(String(100), nullable=False)
+    doctor_id = Column(String(100), nullable=True, index=True)
+    doctor_name = Column(String(255), nullable=True)
     created_at = Column(String(50), nullable=False)
     metadata_ = Column("metadata", JSON_TYPE, nullable=True, default={})
 

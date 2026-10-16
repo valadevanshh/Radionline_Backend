@@ -853,11 +853,15 @@ def _apply_template_action(action_type: str, entity_id: Optional[str], p: dict, 
         return
 
     t = db.query(TemplateDB).filter(TemplateDB.id == tmpl_id).first()
+    doc_id = p.get("doctorId") or (getattr(t, "doctor_id", None) if t else None)
+    doc_name = p.get("doctorName") or (getattr(t, "doctor_name", None) if t else None)
     meta = {
         "bodyPart": p.get("bodyPart"),
         "findings": p.get("findings"),
         "impression": p.get("impression"),
         "content": p.get("content"),
+        "doctorId": doc_id,
+        "doctorName": doc_name,
     }
     now_str = datetime.utcnow().strftime("%Y-%m-%d")
 
@@ -866,6 +870,10 @@ def _apply_template_action(action_type: str, entity_id: Optional[str], p: dict, 
         t.center_id = p.get("centerId", t.center_id)
         t.center_name = p.get("centerName", t.center_name)
         t.modality = p.get("modality", t.modality)
+        if doc_id:
+            t.doctor_id = doc_id
+        if doc_name:
+            t.doctor_name = doc_name
         t.metadata_ = meta
     else:
         t = TemplateDB(
@@ -874,6 +882,8 @@ def _apply_template_action(action_type: str, entity_id: Optional[str], p: dict, 
             center_id=p.get("centerId", "ALL"),
             center_name=p.get("centerName", "All Centers"),
             modality=p.get("modality", "X-Ray"),
+            doctor_id=doc_id,
+            doctor_name=doc_name,
             created_at=now_str,
             metadata_=meta,
         )
