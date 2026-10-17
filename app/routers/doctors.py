@@ -46,7 +46,25 @@ def db_to_schema(d: DoctorDB) -> dict:
         "degree": meta.get("degree", "M.D. (Radiodiagnosis)"),
         "registrationNumber": meta.get("registrationNumber"),
         "createdAt": d.created_at,
+        "photoUrl": file_storage.public_url(meta.get("photoUrl")),
+        "yearsOfExperience": _stored_years(meta.get("yearsOfExperience")),
+        "expertise": _stored_expertise(meta.get("expertise")),
+        "cvUrl": file_storage.public_url(meta.get("cvUrl")),
+        "cvFileName": (meta.get("cvFileName") or "CV") if meta.get("cvUrl") else None,
     }
+
+
+def _stored_years(value) -> Optional[int]:
+    try:
+        return int(value) if value is not None and value != "" else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _stored_expertise(value) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(v) for v in value if isinstance(v, str) and v.strip()]
 
 @router.get("", response_model=list[DoctorResponse])
 def get_doctors(db: Session = Depends(get_db)):
@@ -106,6 +124,15 @@ def save_doctor_core(doc_in: DoctorCreate, db: Session) -> dict:
         "degree": doc_in.degree or "M.D. (Radiodiagnosis)",
         "registrationNumber": doc_in.registrationNumber,
     }
+    merge_profile_media(
+        meta_payload,
+        doc_id,
+        photo_url=doc_in.photoUrl,
+        years=doc_in.yearsOfExperience,
+        expertise=doc_in.expertise,
+        cv_url=doc_in.cvUrl,
+        cv_file_name=doc_in.cvFileName,
+    )
 
     if existing:
         existing.first_name = doc_in.firstName
@@ -114,7 +141,8 @@ def save_doctor_core(doc_in: DoctorCreate, db: Session) -> dict:
         existing.email = doc_in.email
         existing.username = doc_in.username
         existing.contact_number = doc_in.contactNumber
-        existing.metadata_ = meta_payload
+        # keep keys this form does not carry (photo, CV, experience, expertise...)
+        existing.metadata_ = {**(existing.metadata_ or {}), **meta_payload}
         db.commit()
         db.refresh(existing)
         saved_doc = existing
@@ -175,15 +203,216 @@ def signature_filename_hint() -> str:
     return f"signature-{uuid.uuid4().hex[:12]}"
 
 
+# Profile picture / CV / experience / expertise (My Profile). Same rules as the signature:
+# a data: URL is a new upload, "" removes it, any other value keeps the current file.
+PHOTO_MAX_BYTES = 2 * 1024 * 1024
+PHOTO_MIME_TYPES = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}
+CV_MAX_BYTES = 5 * 1024 * 1024
+CV_MIME_TYPES = {
+    "application/pdf": ".pdf",
+    "application/msword": ".doc",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+}
+MAX_YEARS_OF_EXPERIENCE = 70
+MAX_EXPERTISE_TAGS = 20
+MAX_EXPERTISE_TAG_LEN = 40
+
+
+def _magic_ok(mime: str, data: bytes) -> bool:
+    """The bytes must really be the declared type (not just a renamed file)."""
+    if mime == "image/png":
+        return data.startswith(b"\x89PNG\r\n\x1a\n")
+    if mime == "image/jpeg":
+        return data.startswith(b"\xff\xd8\xff")
+    if mime == "image/webp":
+        return len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP"
+    if mime == "application/pdf":
+        return data.startswith(b"%PDF-")
+    if mime == "application/msword":
+        return data.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1")
+    if mime.endswith("wordprocessingml.document"):
+        return data.startswith(b"PK\x03\x04")
+    return False
+
+
+def _decode_upload(raw: str, allowed: dict, max_bytes: int, label: str, kinds: str, limit: str) -> tuple[str, bytes]:
+    m = _SIG_DATA_URL_RE.match(raw)
+    mime = m.group("mime").lower() if m else ""
+    if not m or mime not in allowed:
+        raise HTTPException(status_code=400, detail=f"{label} must be {kinds}")
+    try:
+        data = base64.b64decode(m.group("data"), validate=False)
+    except Exception:
+        raise HTTPException(status_code=400, detail=f"{label} could not be read")
+    if not data:
+        raise HTTPException(status_code=400, detail=f"{label} is empty")
+    if len(data) > max_bytes:
+        raise HTTPException(status_code=400, detail=f"{label} must be {limit} or smaller")
+    if not _magic_ok(mime, data):
+        raise HTTPException(status_code=400, detail=f"{label} does not look like {kinds}")
+    return mime, data
+
+
+def _clean_expertise(values: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for v in values:
+        tag = re.sub(r"\s+", " ", str(v or "")).strip()
+        if not tag:
+            continue
+        if len(tag) > MAX_EXPERTISE_TAG_LEN:
+            raise HTTPException(status_code=400, detail=f"Each expertise must be {MAX_EXPERTISE_TAG_LEN} characters or fewer")
+        if tag.lower() in seen:
+            continue
+        seen.add(tag.lower())
+        out.append(tag)
+    if len(out) > MAX_EXPERTISE_TAGS:
+        raise HTTPException(status_code=400, detail=f"Add at most {MAX_EXPERTISE_TAGS} expertise areas")
+    return out
+
+
+def merge_profile_media(
+    meta: dict,
+    doc_id: str,
+    *,
+    photo_url=None,
+    years=None,
+    expertise=None,
+    cv_url=None,
+    cv_file_name=None,
+) -> dict:
+    """Attach photo / experience / expertise / CV from a create or edit payload."""
+    if years is not None:
+        try:
+            years_n = int(years)
+        except (TypeError, ValueError):
+            years_n = None
+        if years_n is not None and 0 <= years_n <= MAX_YEARS_OF_EXPERIENCE:
+            meta["yearsOfExperience"] = years_n
+    if expertise is not None:
+        try:
+            meta["expertise"] = _clean_expertise(expertise)
+        except HTTPException:
+            meta["expertise"] = [str(v).strip() for v in expertise if str(v).strip()][:MAX_EXPERTISE_TAGS]
+    raw_photo = (photo_url or "").strip() if isinstance(photo_url, str) else None
+    if raw_photo == "":
+        pass
+    elif raw_photo and raw_photo.startswith("data:"):
+        mime, data = _decode_upload(
+            raw_photo, PHOTO_MIME_TYPES, PHOTO_MAX_BYTES, "Profile picture", "a PNG, JPG or WEBP image", "2 MB"
+        )
+        meta["photoUrl"] = file_storage.save_bytes(
+            data,
+            category="doctors",
+            entity_id=doc_id,
+            subfolder="photo",
+            filename=f"photo-{uuid.uuid4().hex[:12]}{PHOTO_MIME_TYPES[mime]}",
+            content_type=mime,
+        )
+    elif raw_photo:
+        stored = file_storage.materialize_media_reference(
+            raw_photo, category="doctors", entity_id=doc_id, subfolder="photo", filename_hint="photo.png"
+        )
+        if stored:
+            meta["photoUrl"] = stored
+    raw_cv = (cv_url or "").strip() if isinstance(cv_url, str) else None
+    if raw_cv == "":
+        pass
+    elif raw_cv and raw_cv.startswith("data:"):
+        mime, data = _decode_upload(raw_cv, CV_MIME_TYPES, CV_MAX_BYTES, "CV", "a PDF, DOC or DOCX file", "5 MB")
+        ext = CV_MIME_TYPES[mime]
+        meta["cvUrl"] = file_storage.save_bytes(
+            data,
+            category="doctors",
+            entity_id=doc_id,
+            subfolder="cv",
+            filename=f"cv-{uuid.uuid4().hex[:12]}{ext}",
+            content_type=mime,
+        )
+        meta["cvFileName"] = _clean_cv_name(cv_file_name, ext)
+    elif raw_cv:
+        stored = file_storage.materialize_media_reference(
+            raw_cv, category="doctors", entity_id=doc_id, subfolder="cv", filename_hint="cv.pdf"
+        )
+        if stored:
+            meta["cvUrl"] = stored
+            if cv_file_name:
+                meta["cvFileName"] = str(cv_file_name)[:150]
+    return meta
+
+
+def _clean_cv_name(name: Optional[str], ext: str) -> str:
+    base = re.split(r"[\\/]", (name or "").strip())[-1]
+    base = re.sub(r"[\x00-\x1f<>:\"|?*]+", "", base).strip(" .")[:150]
+    if not base:
+        base = "CV"
+    if not base.lower().endswith(ext):
+        base = re.sub(r"\.(pdf|docx?|bin)$", "", base, flags=re.I) + ext
+    return base
+
+
 class DoctorProfileUpdate(BaseModel):
     degree: Optional[str] = None
     registrationNumber: Optional[str] = None
     # data: URL = new upload; "" = remove; any other value = keep the current image
     signatureUrl: Optional[str] = None
+    photoUrl: Optional[str] = None
+    # sent (number or null) = set / clear; omitted = keep
+    yearsOfExperience: Optional[int] = None
+    expertise: Optional[list[str]] = None
+    cvUrl: Optional[str] = None
+    cvFileName: Optional[str] = None
 
 
 def _apply_profile_update(db: Session, doc: DoctorDB, body: DoctorProfileUpdate) -> dict:
     meta = dict(doc.metadata_ or {})
+    fields_set = getattr(body, "model_fields_set", None) or getattr(body, "__fields_set__", set())
+    # Validate everything first so a bad field never leaves a half-saved upload behind.
+    if "yearsOfExperience" in fields_set:
+        years = body.yearsOfExperience
+        if years is not None and not (0 <= years <= MAX_YEARS_OF_EXPERIENCE):
+            raise HTTPException(status_code=400, detail=f"Years of experience must be between 0 and {MAX_YEARS_OF_EXPERIENCE}")
+        meta["yearsOfExperience"] = years
+    if body.expertise is not None:
+        meta["expertise"] = _clean_expertise(body.expertise)
+    photo_raw = (body.photoUrl or "").strip() if body.photoUrl is not None else None
+    photo_upload = None
+    if photo_raw and photo_raw.startswith("data:"):
+        photo_upload = _decode_upload(
+            photo_raw, PHOTO_MIME_TYPES, PHOTO_MAX_BYTES, "Profile picture", "a PNG, JPG or WEBP image", "2 MB"
+        )
+    cv_raw = (body.cvUrl or "").strip() if body.cvUrl is not None else None
+    cv_upload = None
+    if cv_raw and cv_raw.startswith("data:"):
+        cv_upload = _decode_upload(cv_raw, CV_MIME_TYPES, CV_MAX_BYTES, "CV", "a PDF, DOC or DOCX file", "5 MB")
+
+    if photo_raw == "":
+        meta["photoUrl"] = None
+    elif photo_upload:
+        mime, data = photo_upload
+        meta["photoUrl"] = file_storage.save_bytes(
+            data,
+            category="doctors",
+            entity_id=doc.id,
+            subfolder="photo",
+            filename=f"photo-{uuid.uuid4().hex[:12]}{PHOTO_MIME_TYPES[mime]}",
+            content_type=mime,
+        )
+    if cv_raw == "":
+        meta["cvUrl"] = None
+        meta["cvFileName"] = None
+    elif cv_upload:
+        mime, data = cv_upload
+        ext = CV_MIME_TYPES[mime]
+        meta["cvUrl"] = file_storage.save_bytes(
+            data,
+            category="doctors",
+            entity_id=doc.id,
+            subfolder="cv",
+            filename=f"cv-{uuid.uuid4().hex[:12]}{ext}",
+            content_type=mime,
+        )
+        meta["cvFileName"] = _clean_cv_name(body.cvFileName, ext)
     if body.degree is not None:
         meta["degree"] = body.degree.strip()[:120]
     if body.registrationNumber is not None:
@@ -222,6 +451,26 @@ def _own_doctor(db: Session, user: UserDB) -> DoctorDB:
     if not doc:
         raise HTTPException(status_code=404, detail="No doctor profile is linked to this login")
     return doc
+
+
+# Doctors directory (cards on /dashboard/doctors) with the profile details.
+# Same audience as that page: Super Admin, Manager and centre logins (not doctors).
+DIRECTORY_ROLES = ("SUPER_ADMIN", "MANAGER", "CENTER")
+
+
+@router.get("/directory", response_model=list[DoctorResponse])
+def get_doctor_directory(
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(require_roles(*DIRECTORY_ROLES)),
+):
+    docs = db.query(DoctorDB).order_by(DoctorDB.full_name).all()
+    rows = []
+    for d in docs:
+        row = db_to_schema(d)
+        if current_user.role not in ("SUPER_ADMIN", "MANAGER"):
+            row["username"] = None  # login names are for the admins only
+        rows.append(row)
+    return rows
 
 
 @router.get("/me", response_model=DoctorResponse)

@@ -2,7 +2,7 @@ import hashlib
 import time
 import uuid
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Tuple
 from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy import update, and_
@@ -630,12 +630,38 @@ async def save_report_core(report_in: ReportCreate, db: Session):
     if prior_case and prior_case.status == "Completed":
         was_completed = True
 
-    uploaded_images = file_storage.materialize_media_list(
-        report_in.uploadedImages,
-        category="cases",
-        entity_id=rep_id,
-        subfolder="uploads",
-    )
+    # Prefer per-study uploads (body part + its views). Fall back to flat uploadedImages.
+    raw_study_uploads = getattr(report_in, "studyUploads", None) or []
+    study_image_map: List[Tuple[str, List]] = []
+    if raw_study_uploads:
+        for su in raw_study_uploads:
+            bp = (getattr(su, "bodyPart", None) or "").strip()
+            if not bp:
+                continue
+            imgs = file_storage.materialize_media_list(
+                list(getattr(su, "images", None) or []),
+                category="cases",
+                entity_id=rep_id,
+                subfolder="uploads",
+            )
+            study_image_map.append((bp, imgs))
+        body_parts_resolved = [bp for bp, _ in study_image_map] or (report_in.bodyParts or ["CHEST PA/AP"])
+        uploaded_images = []
+        for _, imgs in study_image_map:
+            for u in imgs:
+                if u not in uploaded_images:
+                    uploaded_images.append(u)
+        report_in.bodyParts = body_parts_resolved
+    else:
+        body_parts_resolved = report_in.bodyParts if report_in.bodyParts else ["CHEST PA/AP"]
+        uploaded_images = file_storage.materialize_media_list(
+            report_in.uploadedImages,
+            category="cases",
+            entity_id=rep_id,
+            subfolder="uploads",
+        )
+        study_image_map = [(bp, list(uploaded_images)) for bp in body_parts_resolved]
+
     clinical_history_images = file_storage.materialize_media_list(
         getattr(report_in, "clinicalHistoryImages", None),
         category="cases",
@@ -657,7 +683,7 @@ async def save_report_core(report_in: ReportCreate, db: Session):
     )
 
     meta_payload = {
-        "bodyParts": report_in.bodyParts,
+        "bodyParts": body_parts_resolved,
         "ageUnit": report_in.ageUnit or "Years",
         "clinicalNotes": report_in.clinicalNotes,
         "findings": report_in.findings,
@@ -722,16 +748,13 @@ async def save_report_core(report_in: ReportCreate, db: Session):
 
     db.commit()
 
-    # 2. Split bodyParts array into individual studies rows
-    body_parts = report_in.bodyParts if report_in.bodyParts else ["CHEST PA/AP"]
+    # 2. One study per body part; attach only that study's view images
     all_doctors = db.query(DoctorDB).all()
     notified_doc_ids = [d.id for d in all_doctors] if "ALL" in (report_in.assignedDoctorIds or ["ALL"]) else (report_in.assignedDoctorIds or [])
 
     # Study sequence (billing position): a brand-new case numbers its studies by
-    # their 1-based position in this request's bodyParts. A study added later to
-    # an existing case gets max(existing sequence_no)+1. Existing studies are
-    # never renumbered. Legacy cases whose studies have no sequence_no keep NULL
-    # (billing then falls back to the old created_at, id ordering).
+    # their 1-based position in this request. A study added later to an existing
+    # case gets max(existing sequence_no)+1. Existing studies are never renumbered.
     existing_seqs = [
         r[0] for r in db.query(StudyDB.sequence_no).filter(StudyDB.case_id == rep_id).all()
     ]
@@ -742,7 +765,7 @@ async def save_report_core(report_in: ReportCreate, db: Session):
         else None
     )
 
-    for position, bp in enumerate(body_parts, start=1):
+    for position, (bp, study_imgs) in enumerate(study_image_map, start=1):
         sanitized_bp = bp.replace('/', '-').replace(' ', '-').lower()
         study_id = f"{rep_id}-{sanitized_bp}"
         if len(study_id) > 100:
@@ -777,9 +800,8 @@ async def save_report_core(report_in: ReportCreate, db: Session):
             db.add(study_obj)
             db.commit()
 
-            # Insert uploaded images into study_images
-            if uploaded_images:
-                for idx, img_url in enumerate(uploaded_images):
+            if study_imgs:
+                for idx, img_url in enumerate(study_imgs):
                     img_id = billing_svc._bounded_id(f"{study_id}-img-{idx}", "img")
                     image_obj = StudyImageDB(
                         id=img_id,
@@ -791,7 +813,6 @@ async def save_report_core(report_in: ReportCreate, db: Session):
                     db.add(image_obj)
                 db.commit()
 
-            # Populate study_notifications table
             for doc_id in notified_doc_ids:
                 notif_obj = StudyNotificationDB(
                     study_id=study_id,

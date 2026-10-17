@@ -128,6 +128,11 @@ def _snapshot_doctor(doc_id: str, db: Session) -> Optional[dict]:
         "profileFileUrl": meta.get("profileFileUrl"),
         "degree": meta.get("degree"),
         "registrationNumber": meta.get("registrationNumber"),
+        "photoUrl": meta.get("photoUrl"),
+        "yearsOfExperience": meta.get("yearsOfExperience"),
+        "expertise": meta.get("expertise") or [],
+        "cvUrl": meta.get("cvUrl"),
+        "cvFileName": meta.get("cvFileName"),
         "createdAt": d.created_at,
         # password intentionally omitted from before snapshot
     }
@@ -716,7 +721,22 @@ def _apply_doctor_action(action_type: str, entity_id: Optional[str], p: dict, db
             subfolder="profile",
             filename_hint="profile.png",
         ),
+        "degree": p.get("degree"),
+        "registrationNumber": p.get("registrationNumber"),
     }
+    try:
+        from app.routers.doctors import merge_profile_media
+    except ImportError:
+        from app.routers.doctors import merge_profile_media
+    merge_profile_media(
+        meta,
+        doc_id,
+        photo_url=p.get("photoUrl"),
+        years=p.get("yearsOfExperience"),
+        expertise=p.get("expertise"),
+        cv_url=p.get("cvUrl"),
+        cv_file_name=p.get("cvFileName"),
+    )
     now_str = datetime.utcnow().strftime("%Y-%m-%d")
 
     if doc:
@@ -726,7 +746,8 @@ def _apply_doctor_action(action_type: str, entity_id: Optional[str], p: dict, db
         doc.email = p.get("email", doc.email)
         doc.username = p.get("username", doc.username)
         doc.contact_number = p.get("contactNumber", doc.contact_number)
-        doc.metadata_ = meta
+        # keep keys this payload does not carry (degree, reg no, photo, CV, expertise...)
+        doc.metadata_ = {**(doc.metadata_ or {}), **meta}
     else:
         doc = DoctorDB(
             id=doc_id,

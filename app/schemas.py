@@ -49,6 +49,11 @@ class DoctorBase(BaseModel):
     profileFileUrl: Optional[str] = None
     degree: Optional[str] = "M.D. (Radiodiagnosis)"
     registrationNumber: Optional[str] = None
+    photoUrl: Optional[str] = None
+    yearsOfExperience: Optional[int] = None
+    expertise: Optional[List[str]] = None
+    cvUrl: Optional[str] = None
+    cvFileName: Optional[str] = None
 
 class DoctorCreate(DoctorBase):
     id: Optional[str] = None
@@ -56,6 +61,7 @@ class DoctorCreate(DoctorBase):
 class DoctorResponse(DoctorBase):
     id: str
     createdAt: str
+    expertise: list[str] = []
 
     class Config:
         from_attributes = True
@@ -126,8 +132,16 @@ class ReportBase(BaseModel):
     # Study modality: X-Ray | CT | MRI | Sonography | Blood Report
     modality: Optional[str] = None
 
+class StudyUpload(BaseModel):
+    """One body-part study with its own view images (create/upload payload)."""
+    bodyPart: str
+    images: List[str] = []
+
 class ReportCreate(ReportBase):
     id: Optional[str] = None
+    # When set: one signable report per entry, images attached only to that study.
+    # When omitted: legacy bodyParts + uploadedImages (images cloned onto every study).
+    studyUploads: Optional[List[StudyUpload]] = None
 
 class ReportResponse(ReportBase):
     id: str
