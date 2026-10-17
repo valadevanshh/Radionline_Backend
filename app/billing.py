@@ -427,6 +427,34 @@ def set_invoice_status(db: Session, invoice_id: str, status: str) -> InvoiceDB:
     return inv
 
 
+def mark_period_paid(
+    db: Session,
+    period: str,
+    party_type: Optional[str] = None,
+) -> dict:
+    """Mark all invoices for a billing period as paid (monthly settlement)."""
+    if not period or len(period) != 7 or period[4] != "-":
+        raise ValueError("period must be YYYY-MM")
+    q = db.query(InvoiceDB).filter(InvoiceDB.billing_period == period)
+    if party_type in ("center", "doctor"):
+        q = q.filter(InvoiceDB.party_type == party_type)
+    invoices = q.all()
+    ts = now_ist_iso()
+    updated = 0
+    for inv in invoices:
+        if (inv.status or "").lower() != "paid":
+            inv.status = "paid"
+            inv.updated_at = ts
+            updated += 1
+    db.flush()
+    return {
+        "period": period,
+        "partyType": party_type,
+        "matched": len(invoices),
+        "updated": updated,
+    }
+
+
 def invoice_to_dict(inv: InvoiceDB, include_effective_status: bool = True) -> dict:
     eff = compute_effective_status(inv.status, inv.billing_period) if include_effective_status else inv.status
     return {

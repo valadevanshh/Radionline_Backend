@@ -42,6 +42,11 @@ class LockPeriodRequest(BaseModel):
     unlock: Optional[bool] = False
 
 
+class MarkPeriodPaidRequest(BaseModel):
+    period: str  # YYYY-MM
+    partyType: Optional[str] = None  # center | doctor | None = both
+
+
 def _meta(user: UserDB) -> dict:
     return user.metadata_ or {}
 
@@ -198,6 +203,21 @@ def lock_period(
             result = billing_svc.unlock_billing_period(db, body.period, user.name or user.email)
         else:
             result = billing_svc.lock_billing_period(db, body.period, user.name or user.email)
+        db.commit()
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@billing_router.post("/mark-period-paid")
+def mark_period_paid(
+    body: MarkPeriodPaidRequest,
+    db: Session = Depends(get_db),
+    _user: UserDB = Depends(require_roles("SUPER_ADMIN")),
+):
+    """Mark every invoice in a month as paid (optional partyType filter)."""
+    try:
+        result = billing_svc.mark_period_paid(db, body.period, body.partyType)
         db.commit()
         return result
     except ValueError as e:
