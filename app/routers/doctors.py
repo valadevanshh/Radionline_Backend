@@ -192,7 +192,7 @@ def save_doctor_core(doc_in: DoctorCreate, db: Session) -> dict:
 # The doctor edits their own; the Super Admin can edit any doctor's. Only these
 # keys are changed (the rest of the doctor record is left as it is).
 # ---------------------------------------------------------------------------
-SIGNATURE_MAX_BYTES = 2 * 1024 * 1024
+SIGNATURE_MAX_BYTES = 5 * 1024 * 1024
 SIGNATURE_MIME_TYPES = {"image/png", "image/jpeg", "image/webp"}
 _SIG_DATA_URL_RE = re.compile(r"^data:(?P<mime>[\w/+.-]+);base64,(?P<data>.+)$", re.DOTALL)
 
@@ -205,7 +205,7 @@ def signature_filename_hint() -> str:
 
 # Profile picture / CV / experience / expertise (My Profile). Same rules as the signature:
 # a data: URL is a new upload, "" removes it, any other value keeps the current file.
-PHOTO_MAX_BYTES = 2 * 1024 * 1024
+PHOTO_MAX_BYTES = 5 * 1024 * 1024
 PHOTO_MIME_TYPES = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}
 CV_MAX_BYTES = 5 * 1024 * 1024
 CV_MIME_TYPES = {
@@ -299,7 +299,7 @@ def merge_profile_media(
         pass
     elif raw_photo and raw_photo.startswith("data:"):
         mime, data = _decode_upload(
-            raw_photo, PHOTO_MIME_TYPES, PHOTO_MAX_BYTES, "Profile picture", "a PNG, JPG or WEBP image", "2 MB"
+            raw_photo, PHOTO_MIME_TYPES, PHOTO_MAX_BYTES, "Profile picture", "a PNG, JPG or WEBP image", "5 MB"
         )
         meta["photoUrl"] = file_storage.save_bytes(
             data,
@@ -379,7 +379,7 @@ def _apply_profile_update(db: Session, doc: DoctorDB, body: DoctorProfileUpdate)
     photo_upload = None
     if photo_raw and photo_raw.startswith("data:"):
         photo_upload = _decode_upload(
-            photo_raw, PHOTO_MIME_TYPES, PHOTO_MAX_BYTES, "Profile picture", "a PNG, JPG or WEBP image", "2 MB"
+            photo_raw, PHOTO_MIME_TYPES, PHOTO_MAX_BYTES, "Profile picture", "a PNG, JPG or WEBP image", "5 MB"
         )
     cv_raw = (body.cvUrl or "").strip() if body.cvUrl is not None else None
     cv_upload = None
@@ -430,7 +430,7 @@ def _apply_profile_update(db: Session, doc: DoctorDB, body: DoctorProfileUpdate)
             except Exception:
                 raise HTTPException(status_code=400, detail="Signature image could not be read")
             if size > SIGNATURE_MAX_BYTES:
-                raise HTTPException(status_code=400, detail="Signature image must be 2 MB or smaller")
+                raise HTTPException(status_code=400, detail="Signature image must be 5 MB or smaller")
             meta["signatureUrl"] = file_storage.materialize_media_reference(
                 raw,
                 category="doctors",
