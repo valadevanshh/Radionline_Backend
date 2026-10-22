@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, List
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -98,6 +98,35 @@ class StudyReportPayload(BaseModel):
     dicomSnapshots: Optional[List[str]] = None
     # Report title shown on the page / PDF (saved on sign so the public view matches)
     title: Optional[str] = None
+    # Reporting date (YYYY-MM-DD) chosen by the doctor; when never set, signing stamps today's date (IST)
+    reportDate: Optional[str] = None
+
+
+def _ist_today() -> str:
+    return (datetime.utcnow() + timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d")
+
+
+def _clean_report_date(value) -> Optional[str]:
+    s = str(value or "").strip()[:10]
+    try:
+        return datetime.strptime(s, "%Y-%m-%d").strftime("%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Report date must be YYYY-MM-DD")
+
+
+def study_report_date(study) -> Optional[str]:
+    """Reporting date: the stored one, else the IST date of signing (older reports), else None."""
+    meta = (getattr(study, "metadata_", None) or {}) if study else {}
+    if meta.get("reportDate"):
+        return meta.get("reportDate")
+    signed = getattr(study, "signed_at", None) if study else None
+    if signed:
+        try:
+            dt = datetime.fromisoformat(str(signed).replace("Z", ""))
+            return (dt + timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d")
+        except ValueError:
+            return str(signed)[:10]
+    return None
 
 
 def ensure_study_report_columns(bind=None) -> None:
@@ -275,6 +304,7 @@ def enrich_case_item(item: dict, case: CaseDB, studies: list) -> dict:
             "technique": getattr(s, "technique", None),
             "templateId": getattr(s, "template_id", None),
             "signedAt": getattr(s, "signed_at", None),
+            "reportDate": study_report_date(s),
             "signedBy": getattr(s, "signed_by", None),
             "signedByName": getattr(s, "signed_by_name", None),
             "claimedBy": s.claimed_by,
@@ -355,6 +385,11 @@ def apply_study_payload(study: StudyDB, payload: StudyReportPayload) -> None:
         study.clinical_notes = payload.clinicalNotes
     if payload.docContent is not None:
         study.doc_content = payload.docContent
+    if payload.reportDate:
+        meta = dict(study.metadata_ or {})
+        meta["reportDate"] = _clean_report_date(payload.reportDate)
+        meta["reportDateEdited"] = True
+        study.metadata_ = meta
     if payload.dicomSnapshots is not None:
         try:
             from app import storage as file_storage
@@ -627,6 +662,9 @@ async def sign_study_report(
     smeta["signer"] = build_signer_snapshot(doc, doctor_id, doctor_name, study.signed_at)
     if payload.title is not None and payload.title.strip():
         smeta["title"] = payload.title.strip()[:200]
+    # Reporting date: keep the doctor's chosen date, otherwise the date it was signed (IST)
+    if not smeta.get("reportDateEdited") or not smeta.get("reportDate"):
+        smeta["reportDate"] = _ist_today()
     study.metadata_ = smeta
     # Unguessable token for the public QR view (kept on re-sign)
     report_links.ensure_public_link(db, study)

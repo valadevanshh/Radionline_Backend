@@ -96,6 +96,10 @@ class ReportBase(BaseModel):
     fullName: str
     age: int
     ageUnit: Optional[str] = "Years"
+    ageYears: Optional[int] = None
+    ageMonths: Optional[int] = None
+    ageDays: Optional[int] = None
+    reportDate: Optional[str] = None
     gender: str
     phone: str
     radiologyCenterId: str

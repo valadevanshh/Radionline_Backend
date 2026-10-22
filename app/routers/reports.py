@@ -90,6 +90,10 @@ def db_to_schema(r: ReportDB) -> dict:
         "fullName": r.full_name,
         "age": r.age,
         "ageUnit": meta.get("ageUnit", "Years"),
+        "ageYears": meta.get("ageYears"),
+        "ageMonths": meta.get("ageMonths"),
+        "ageDays": meta.get("ageDays"),
+        "reportDate": meta.get("reportDate"),
         "gender": r.gender,
         "phone": r.phone,
         "radiologyCenterId": r.radiology_center_id,
@@ -143,6 +147,10 @@ def study_to_schema(study: StudyDB, case: Optional[CaseDB] = None) -> dict:
         "fullName": case.full_name if case else "Unnamed Patient",
         "age": case.age if case else 30,
         "ageUnit": meta.get("ageUnit", "Years"),
+        "ageYears": meta.get("ageYears"),
+        "ageMonths": meta.get("ageMonths"),
+        "ageDays": meta.get("ageDays"),
+        "reportDate": meta.get("reportDate"),
         "gender": case.gender if case else "Male",
         "phone": case.phone if case else "0000000000",
         "radiologyCenterId": case.radiology_center_id if case else "center-1",
@@ -685,6 +693,10 @@ async def save_report_core(report_in: ReportCreate, db: Session):
     meta_payload = {
         "bodyParts": body_parts_resolved,
         "ageUnit": report_in.ageUnit or "Years",
+        "ageYears": getattr(report_in, "ageYears", None),
+        "ageMonths": getattr(report_in, "ageMonths", None),
+        "ageDays": getattr(report_in, "ageDays", None),
+        "reportDate": getattr(report_in, "reportDate", None),
         "clinicalNotes": report_in.clinicalNotes,
         "findings": report_in.findings,
         "impression": report_in.impression,
@@ -1122,6 +1134,8 @@ class CaseDetailsUpdate(BaseModel):
     clinicalNotes: Optional[str] = None
     isUrgent: Optional[bool] = None
     isPortable: Optional[bool] = None
+    # Study date (DD-MM-YYYY or YYYY-MM-DD), stored in cases.study_date
+    studyDate: Optional[str] = None
     # Extra scan images (stored file paths from /files/upload, or data: URLs)
     addImages: Optional[List[str]] = None
 

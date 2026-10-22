@@ -10,17 +10,29 @@ try:
     from app.models import CaseDB, CenterDB, ReportDB, StudyDB
     from app import storage as file_storage
     from app.report_links import find_active_link
-    from app.routers.study_reports import signer_public, study_report_status
+    from app.routers.study_reports import signer_public, study_report_status, study_report_date
 except ImportError:
     from app.database import get_db
     from app.models import CaseDB, CenterDB, ReportDB, StudyDB
     from app import storage as file_storage
     from app.report_links import find_active_link
-    from app.routers.study_reports import signer_public, study_report_status
+    from app.routers.study_reports import signer_public, study_report_status, study_report_date
 
 router = APIRouter(prefix="/public", tags=["Public reports"])
 
 NOT_FOUND = "This report link is not valid or has been withdrawn."
+
+
+def short_report_id(value: str | None) -> str:
+    """Six-character printed report reference ("3F0AE1"): FNV-1a 32-bit of the study id,
+    last 6 hex digits, upper case. Must match shortReportId() in the frontend print-helper."""
+    if not value:
+        return ""
+    h = 0x811C9DC5
+    for b in str(value).strip().encode("utf-8"):
+        h ^= b
+        h = (h * 0x01000193) & 0xFFFFFFFF
+    return f"{h:08X}"[-6:]
 
 
 @router.get("/reports/{token}")
@@ -79,6 +91,9 @@ def get_public_report(token: str, response: Response, db: Session = Depends(get_
             "impression": study.impression or "",
             "clinicalHistory": study.clinical_notes or cmeta.get("clinicalNotes") or rmeta.get("clinicalNotes") or "",
             "signedAt": study.signed_at,
+            "reportDate": study_report_date(study),
+            "reportId": short_report_id(study.id),
+            "isPortable": bool(cmeta.get("isPortable") or rmeta.get("isPortable")),
         },
         "signer": signer,
     }

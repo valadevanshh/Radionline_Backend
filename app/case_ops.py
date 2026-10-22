@@ -27,12 +27,12 @@ logger = logging.getLogger(__name__)
 # body parts are NOT editable here: they drive the per-study rows and billing.
 EDITABLE_CASE_FIELDS = (
     "fullName", "age", "ageUnit", "gender", "phone",
-    "referringPhysicianName", "clinicalNotes", "isUrgent", "isPortable",
+    "referringPhysicianName", "clinicalNotes", "isUrgent", "isPortable", "studyDate",
 )
 FIELD_LABELS = {
     "fullName": "Name", "age": "Age", "ageUnit": "Age unit", "gender": "Gender", "phone": "Phone",
     "referringPhysicianName": "Referring doctor", "clinicalNotes": "Clinical notes",
-    "isUrgent": "Urgent", "isPortable": "Portable",
+    "isUrgent": "Urgent", "isPortable": "Portable", "studyDate": "Study date",
 }
 GENDERS = ("Male", "Female", "Other")
 AGE_UNITS = ("Years", "Months", "Days")
@@ -93,7 +93,28 @@ def case_details_snapshot(case: CaseDB) -> dict:
         "clinicalNotes": meta.get("clinicalNotes"),
         "isUrgent": bool(case.is_urgent) if case.is_urgent is not None else bool(meta.get("isUrgent")),
         "isPortable": bool(meta.get("isPortable")),
+        "studyDate": case.study_date,
     }
+
+
+def normalize_study_date(value) -> str:
+    """Study date as DD-MM-YYYY (the format uploads already use). Accepts YYYY-MM-DD, DD-MM-YYYY or DD/MM/YYYY."""
+    import re
+    from datetime import date
+    s = str(value or "").strip()
+    m = re.match(r"^(\d{4})-(\d{1,2})-(\d{1,2})", s)
+    if m:
+        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    else:
+        m = re.match(r"^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$", s)
+        if not m:
+            raise ValueError("Study date must be a valid date")
+        d, mo, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    try:
+        date(y, mo, d)
+    except ValueError:
+        raise ValueError("Study date must be a valid date")
+    return f"{d:02d}-{mo:02d}-{y:04d}"
 
 
 def clean_case_details(raw: dict) -> dict:
@@ -131,6 +152,8 @@ def clean_case_details(raw: dict) -> dict:
             v = str(v)
         elif k in ("isUrgent", "isPortable"):
             v = bool(v)
+        elif k == "studyDate":
+            v = normalize_study_date(v)
         out[k] = v
     return out
 
@@ -217,6 +240,8 @@ def apply_case_details(db: Session, case: CaseDB, details: dict, add_images: Opt
             row.referring_physician_name = changes["referringPhysicianName"]
         if "isUrgent" in changes:
             row.is_urgent = changes["isUrgent"]
+        if "studyDate" in changes:
+            row.study_date = changes["studyDate"]
         row.metadata_ = _apply_meta(row.metadata_)
         flag_modified(row, "metadata_")
 
