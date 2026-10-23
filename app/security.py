@@ -42,6 +42,7 @@ def create_access_token(data: dict[str, Any], expires_hours: Optional[int] = Non
     hours = expires_hours if expires_hours is not None else settings.JWT_EXPIRE_HOURS
     expire = datetime.now(timezone.utc) + timedelta(hours=hours)
     payload["exp"] = expire
+    payload["iat"] = int(datetime.now(timezone.utc).timestamp())
     return jwt.encode(payload, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
 
 
@@ -107,6 +108,19 @@ def get_current_user(
             detail="User not found",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    # Password reset by an admin ends sessions issued before it (no iat = issued before this check existed)
+    changed = (user.metadata_ or {}).get("passwordChangedAt")
+    if changed:
+        try:
+            iat = int(payload.get("iat") or 0)
+        except (TypeError, ValueError):
+            iat = 0
+        if iat < int(changed):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Session expired, please log in again",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
     # Prefer role from DB; token role is informational
     return user
 
