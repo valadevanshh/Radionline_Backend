@@ -140,6 +140,8 @@ class StudyUpload(BaseModel):
     """One body-part study with its own view images (create/upload payload)."""
     bodyPart: str
     images: List[str] = []
+    # This study's own date (DD-MM-YYYY or YYYY-MM-DD); stored in studies.metadata.studyDate
+    studyDate: Optional[str] = None
 
 class ReportCreate(ReportBase):
     id: Optional[str] = None

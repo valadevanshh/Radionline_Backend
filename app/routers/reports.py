@@ -638,9 +638,22 @@ async def save_report_core(report_in: ReportCreate, db: Session):
     if prior_case and prior_case.status == "Completed":
         was_completed = True
 
+    # Patient ID: auto 7-digit for a new case; an existing case keeps its stored value.
+    try:
+        from app.case_ops import resolve_patient_number
+    except ImportError:
+        from app.case_ops import resolve_patient_number
+    report_in.patientNumber = resolve_patient_number(
+        db,
+        report_in.patientNumber,
+        existing=(prior_case.patient_number if prior_case else (prior_report.patient_number if prior_report else None)),
+        is_new=prior_case is None and prior_report is None,
+    )
+
     # Prefer per-study uploads (body part + its views). Fall back to flat uploadedImages.
     raw_study_uploads = getattr(report_in, "studyUploads", None) or []
     study_image_map: List[Tuple[str, List]] = []
+    study_date_map: dict = {}
     if raw_study_uploads:
         for su in raw_study_uploads:
             bp = (getattr(su, "bodyPart", None) or "").strip()
@@ -653,6 +666,19 @@ async def save_report_core(report_in: ReportCreate, db: Session):
                 subfolder="uploads",
             )
             study_image_map.append((bp, imgs))
+            sd = (getattr(su, "studyDate", None) or "").strip()
+            if sd:
+                try:
+                    from app.case_ops import normalize_study_date
+                except ImportError:
+                    from app.case_ops import normalize_study_date
+                try:
+                    study_date_map[bp] = normalize_study_date(sd)
+                except ValueError:
+                    raise HTTPException(status_code=400, detail=f"Invalid study date for {bp}")
+        # cases.study_date = first study's date (back-compat for lists, billing, filters)
+        if study_image_map and study_date_map.get(study_image_map[0][0]):
+            report_in.studyDate = study_date_map[study_image_map[0][0]]
         body_parts_resolved = [bp for bp, _ in study_image_map] or (report_in.bodyParts or ["CHEST PA/AP"])
         uploaded_images = []
         for _, imgs in study_image_map:
@@ -807,7 +833,7 @@ async def save_report_core(report_in: ReportCreate, db: Session):
                 claimed_by_name=report_in.claimedByDoctorName,
                 sequence_no=seq_no,
                 created_at=created_at,
-                metadata_=meta_payload,
+                metadata_=({**meta_payload, "studyDate": study_date_map[bp]} if study_date_map.get(bp) else meta_payload),
             )
             db.add(study_obj)
             db.commit()
@@ -837,6 +863,10 @@ async def save_report_core(report_in: ReportCreate, db: Session):
         else:
             study_obj.is_urgent = is_urg
             study_obj.modality = study_modality
+            if study_date_map.get(bp):
+                smeta = dict(study_obj.metadata_ or {})
+                smeta["studyDate"] = study_date_map[bp]
+                study_obj.metadata_ = smeta
             db.commit()
 
     # 3. Save to legacy ReportDB table for backward compatibility
@@ -1136,6 +1166,8 @@ class CaseDetailsUpdate(BaseModel):
     isPortable: Optional[bool] = None
     # Study date (DD-MM-YYYY or YYYY-MM-DD), stored in cases.study_date
     studyDate: Optional[str] = None
+    # Per-study dates {studyId: date}, stored in studies.metadata.studyDate
+    studyDates: Optional[dict] = None
     # Extra scan images (stored file paths from /files/upload, or data: URLs)
     addImages: Optional[List[str]] = None
 

@@ -297,6 +297,8 @@ def enrich_case_item(item: dict, case: CaseDB, studies: list) -> dict:
             "id": s.id,
             "bodyPart": s.body_part,
             "modality": s.modality,
+            # The study's own date; falls back to the case date for older studies
+            "studyDate": (s.metadata_ or {}).get("studyDate") or case.study_date,
             "reportStatus": study_report_status(s),
             "status": s.status,
             "findings": s.findings,

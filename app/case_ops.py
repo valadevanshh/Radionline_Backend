@@ -1,11 +1,13 @@
 """Case-level operations shared by the reports router and the approvals flow:
 proper delete (every dependent row) and the patient-details edit."""
 import logging
+import re
+import secrets
 import uuid
 from datetime import datetime
 from typing import Optional, Tuple
 
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, object_session
 from sqlalchemy.orm.attributes import flag_modified
 
 try:
@@ -22,6 +24,35 @@ except ImportError:
     from app import storage as file_storage
 
 logger = logging.getLogger(__name__)
+
+_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
+
+
+def generate_patient_number(db: Session, attempts: int = 25) -> str:
+    """Random 7-digit Patient ID (1000000-9999999) not used by any case / legacy report.
+    No unique constraint on patient_number, so this is check-then-insert (9M values; a
+    clash needs two uploads drawing the same number in the same instant)."""
+    for _ in range(attempts):
+        candidate = str(secrets.randbelow(9_000_000) + 1_000_000)
+        taken = (
+            db.query(CaseDB.id).filter(CaseDB.patient_number == candidate).first()
+            or db.query(ReportDB.id).filter(ReportDB.patient_number == candidate).first()
+        )
+        if not taken:
+            return candidate
+    raise RuntimeError("Could not allocate a unique Patient ID")
+
+
+def resolve_patient_number(db: Session, supplied: Optional[str], existing: Optional[str] = None,
+                           is_new: bool = True) -> str:
+    """Keep a real supplied value; an existing case keeps its stored value; a new case with
+    nothing (or a raw UUID) gets a fresh 7-digit Patient ID."""
+    val = (supplied or "").strip()
+    if val and not _UUID_RE.match(val):
+        return val[:100]
+    if not is_new:
+        return existing if existing is not None else val
+    return generate_patient_number(db)
 
 # Patient details a centre / admin may correct after upload. Centre, modality and
 # body parts are NOT editable here: they drive the per-study rows and billing.
@@ -94,7 +125,25 @@ def case_details_snapshot(case: CaseDB) -> dict:
         "isUrgent": bool(case.is_urgent) if case.is_urgent is not None else bool(meta.get("isUrgent")),
         "isPortable": bool(meta.get("isPortable")),
         "studyDate": case.study_date,
+        "studyDates": _study_dates_snapshot(case),
+        "studyLabels": _study_labels(case),
     }
+
+
+def _study_labels(case: CaseDB) -> dict:
+    sess = object_session(case)
+    if sess is None:
+        return {}
+    return {st.id: st.body_part for st in sess.query(StudyDB).filter(StudyDB.case_id == case.id).all()}
+
+
+def _study_dates_snapshot(case: CaseDB) -> dict:
+    """{studyId: date} using each study's own date, else the case date."""
+    sess = object_session(case)
+    if sess is None:
+        return {}
+    rows = sess.query(StudyDB).filter(StudyDB.case_id == case.id).all()
+    return {st.id: (st.metadata_ or {}).get("studyDate") or case.study_date for st in rows}
 
 
 def normalize_study_date(value) -> str:
@@ -155,11 +204,23 @@ def clean_case_details(raw: dict) -> dict:
         elif k == "studyDate":
             v = normalize_study_date(v)
         out[k] = v
+    sd = raw.get("studyDates")
+    if isinstance(sd, dict) and sd:
+        out["studyDates"] = {str(sid)[:100]: normalize_study_date(v) for sid, v in sd.items() if v}
     return out
 
 
 def changed_fields(before: dict, details: dict) -> dict:
-    return {k: v for k, v in details.items() if before.get(k) != v}
+    out = {}
+    for k, v in details.items():
+        if k == "studyDates":
+            prev = before.get("studyDates") or {}
+            diff = {sid: d for sid, d in (v or {}).items() if sid in prev and prev.get(sid) != d}
+            if diff:
+                out[k] = diff
+        elif before.get(k) != v:
+            out[k] = v
+    return out
 
 
 def _fmt(v) -> str:
@@ -172,7 +233,14 @@ def _fmt(v) -> str:
 
 
 def describe_changes(before: dict, changes: dict, added_images: int = 0) -> str:
-    parts = [f"{FIELD_LABELS.get(k, k)}: {_fmt(before.get(k))} -> {_fmt(v)}" for k, v in changes.items()]
+    parts = []
+    for k, v in changes.items():
+        if k == "studyDates":
+            prev = before.get("studyDates") or {}
+            for sid, d in v.items():
+                parts.append(f"Study date ({(before.get('studyLabels') or {}).get(sid, sid)}): {_fmt(prev.get(sid))} -> {_fmt(d)}")
+            continue
+        parts.append(f"{FIELD_LABELS.get(k, k)}: {_fmt(before.get(k))} -> {_fmt(v)}")
     if added_images:
         parts.append(f"{added_images} image(s) added")
     return "; ".join(parts)
@@ -247,6 +315,11 @@ def apply_case_details(db: Session, case: CaseDB, details: dict, add_images: Opt
 
     now = _now_iso()
     for st in studies:
+        if st.id in (changes.get("studyDates") or {}):
+            smeta = dict(st.metadata_ or {})
+            smeta["studyDate"] = changes["studyDates"][st.id]
+            st.metadata_ = smeta
+            flag_modified(st, "metadata_")
         if "isUrgent" in changes:
             st.is_urgent = changes["isUrgent"]
         if "clinicalNotes" in changes and (st.report_status or "PENDING") != "SIGNED":

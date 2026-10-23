@@ -520,6 +520,14 @@ def _resolve_case_modality(p: dict) -> str:
         value = pricing.DEFAULT_STUDY_MODALITY
     return value
 
+def _new_case_patient_number(db: Session, supplied) -> str:
+    try:
+        from app.case_ops import resolve_patient_number
+    except ImportError:
+        from app.case_ops import resolve_patient_number
+    return resolve_patient_number(db, supplied if isinstance(supplied, str) else None, is_new=True)
+
+
 def _apply_case_action(action_type: str, entity_id: Optional[str], p: dict, db: Session):
     case_id = entity_id or p.get("id") or f"case-{int(time.time() * 1000)}"
     if action_type.startswith("DELETE"):
@@ -583,7 +591,7 @@ def _apply_case_action(action_type: str, entity_id: Optional[str], p: dict, db: 
     if not c:
         c = CaseDB(
             id=case_id,
-            patient_number=p.get("patientNumber", f"P-{int(time.time())}"),
+            patient_number=_new_case_patient_number(db, p.get("patientNumber")),
             full_name=p.get("fullName", "Unnamed Patient"),
             age=int(p.get("age", 30)),
             gender=p.get("gender", "Male"),
