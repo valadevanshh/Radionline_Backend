@@ -45,13 +45,13 @@ def generate_patient_number(db: Session, attempts: int = 25) -> str:
 
 def resolve_patient_number(db: Session, supplied: Optional[str], existing: Optional[str] = None,
                            is_new: bool = True) -> str:
-    """Keep a real supplied value; an existing case keeps its stored value; a new case with
-    nothing (or a raw UUID) gets a fresh 7-digit Patient ID."""
-    val = (supplied or "").strip()
-    if val and not _UUID_RE.match(val):
-        return val[:100]
+    """Patient IDs are server-assigned: a new case always gets a fresh 7-digit Patient ID
+    (any client-supplied value is ignored); an existing case keeps its stored value."""
     if not is_new:
-        return existing if existing is not None else val
+        if existing:
+            return existing
+        val = (supplied or "").strip()
+        return val[:100] if val and not _UUID_RE.match(val) else generate_patient_number(db)
     return generate_patient_number(db)
 
 # Patient details a centre / admin may correct after upload. Centre, modality and

@@ -245,7 +245,7 @@ async def announce_pending_approval(db: Session, appr: PendingApprovalDB, actor:
     """Live event for open Approvals pages + a bell notification for every Super Admin."""
     schema_data = db_to_schema(appr)
     await ws_manager.broadcast({"type": "PENDING_APPROVAL_REQUEST", "approval": schema_data})
-    if actor is not None and actor.role == "MANAGER":
+    if actor is not None and actor.role in ("MANAGER", "CENTER", "DOCTOR"):
         await notif_svc.notify_approval_requested(db, appr, actor)
     return schema_data
 

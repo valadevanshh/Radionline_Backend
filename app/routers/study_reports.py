@@ -292,6 +292,46 @@ def enrich_case_item(item: dict, case: CaseDB, studies: list) -> dict:
     item["signedStudyCount"] = signed
     item["pendingStudyCount"] = max(0, total - signed)
     item["isPartial"] = bool(total > 0 and 0 < signed < total)
+    # Per-study image URLs (list row "+" expander); one query per case
+    images_by_study: dict = {}
+    try:
+        from sqlalchemy.orm import object_session
+        try:
+            from app.models import StudyImageDB
+        except ImportError:
+            from app.models import StudyImageDB
+        sess = object_session(case) if case is not None else None
+        ids = [s.id for s in studies]
+        if sess is not None and ids:
+            rows = (
+                sess.query(StudyImageDB.study_id, StudyImageDB.image_url)
+                .filter(StudyImageDB.study_id.in_(ids))
+                .order_by(StudyImageDB.created_at.asc())
+                .all()
+            )
+            for sid, url in rows:
+                images_by_study.setdefault(sid, []).append(url)
+    except Exception as e:  # never break the list over thumbnails
+        logger.warning("Study images lookup skipped: %s", e)
+    # Patient-details edit waiting for Super Admin review -> "In Review" marker
+    try:
+        try:
+            from app.models import PendingApprovalDB
+        except ImportError:
+            from app.models import PendingApprovalDB
+        sess2 = object_session(case) if case is not None else None
+        item["pendingEdit"] = bool(
+            sess2 is not None
+            and sess2.query(PendingApprovalDB.id)
+            .filter(
+                PendingApprovalDB.entity_id == case.id,
+                PendingApprovalDB.status == "PENDING",
+                PendingApprovalDB.action_type == "UPDATE_CASE",
+            )
+            .first()
+        )
+    except Exception as e:
+        logger.warning("Pending edit lookup skipped: %s", e)
     item["studies"] = [
         {
             "id": s.id,
@@ -300,6 +340,7 @@ def enrich_case_item(item: dict, case: CaseDB, studies: list) -> dict:
             # The study's own date; falls back to the case date for older studies
             "studyDate": (s.metadata_ or {}).get("studyDate") or case.study_date,
             "reportStatus": study_report_status(s),
+            "images": file_storage.public_url_list(images_by_study.get(s.id, [])),
             "status": s.status,
             "findings": s.findings,
             "impression": s.impression,

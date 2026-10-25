@@ -1196,8 +1196,8 @@ async def update_case_details(
 ):
     """Edit a patient record's details (row Edit action).
     * Super Admin: applied at once.
-    * Centre login: applied at once with Reports = write for the case's centre.
-    * Manager: staged as UPDATE_CASE for Super Admin approval (202).
+    * Centre login (Reports = write for the case's centre) and Manager: staged as
+      UPDATE_CASE for Super Admin approval (202); nothing changes until it is approved.
     * Doctor / others: 403.
     Centre, modality and body parts are not editable (they drive studies and billing).
     Every applied edit is written to the case's activity thread (Chat)."""
@@ -1222,7 +1222,7 @@ async def update_case_details(
     if not changes and not add_images:
         return {"updated": False, "message": "No changes", "report": _report_item(db, case.id)}
 
-    if role == "MANAGER":
+    if role in ("MANAGER", "CENTER"):
         try:
             from app.routers.approvals import create_pending_approval, announce_pending_approval, pending_response
         except ImportError:
@@ -1235,7 +1235,7 @@ async def update_case_details(
             db, current_user, action_type="UPDATE_CASE", entity_type="case", entity_id=case.id, payload=payload,
         )
         data = await announce_pending_approval(db, appr, current_user)
-        return pending_response(data, "Edit sent to the Super Admin for approval.")
+        return pending_response(data, "Edit sent to the Super Admin for review. It will show once approved (In Review).")
 
     before, applied, added = case_ops.apply_case_details(db, case, details, add_images)
     case_ops.add_edit_note(db, case, current_user, case_ops.describe_changes(before, applied, added))

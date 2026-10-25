@@ -1,4 +1,5 @@
 """Priority 6: case flag/reassign, doctor recheck, and durable comment thread."""
+import json
 import logging
 from datetime import datetime
 from typing import List, Optional
@@ -63,7 +64,28 @@ router = APIRouter(
     dependencies=[Depends(get_current_user)],
 )
 
-COMMENT_KINDS = {"FLAG", "REASSIGN", "RECHECK", "COMMENT"}
+COMMENT_KINDS = {"FLAG", "REASSIGN", "RECHECK", "COMMENT", "RECHECK_REQ", "OTHER"}
+# Kinds anyone with case access may post from the chat box
+CHAT_KINDS = {"COMMENT", "RECHECK_REQ", "OTHER"}
+# Chat attachments are stored inside the comment body after this marker (no schema change):
+# "<text>\n\n[[rn-attach]][{"path": ..., "name": ..., "size": ...}]"
+ATTACH_MARK = "\n\n[[rn-attach]]"
+MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024
+MAX_ATTACHMENTS = 5
+
+
+def _split_body(body: str):
+    text = body or ""
+    tag = ATTACH_MARK.strip()
+    i = text.find(tag)
+    if i < 0:
+        return text, []
+    try:
+        items = json.loads(text[i + len(tag):])
+        items = [a for a in items if isinstance(a, dict) and a.get("path")] if isinstance(items, list) else []
+    except (ValueError, TypeError):
+        items = []
+    return text[:i].rstrip(), items
 
 
 def ensure_report_comment_tables(bind=None) -> None:
@@ -78,6 +100,11 @@ def _now_iso() -> str:
 
 
 def _comment_to_schema(row: ReportCommentDB) -> dict:
+    text, attachments = _split_body(row.body)
+    try:
+        from app import storage as _fs
+    except ImportError:
+        from app import storage as _fs
     return {
         "id": row.id,
         "caseId": row.case_id,
@@ -86,7 +113,11 @@ def _comment_to_schema(row: ReportCommentDB) -> dict:
         "authorRole": row.author_role,
         "authorName": row.author_name,
         "kind": row.kind,
-        "body": row.body,
+        "body": text,
+        "attachments": [
+            {"path": a.get("path"), "url": _fs.public_url(a.get("path")), "name": a.get("name") or "file", "size": a.get("size")}
+            for a in attachments
+        ],
         "fromDoctorId": row.from_doctor_id,
         "toDoctorId": row.to_doctor_id,
         "createdAt": row.created_at,
@@ -351,9 +382,24 @@ async def add_comment(
     current_user: UserDB = Depends(get_current_user),
 ):
     body = (payload.body or "").strip()
-    if not body:
+    kind = (payload.kind or "COMMENT").strip().upper()
+    if kind not in CHAT_KINDS:
+        raise HTTPException(status_code=400, detail="Unknown message type")
+    attachments = list(payload.attachments or [])
+    if len(attachments) > MAX_ATTACHMENTS:
+        raise HTTPException(status_code=400, detail=f"At most {MAX_ATTACHMENTS} files per message")
+    if kind == "RECHECK_REQ" and not body:
+        raise HTTPException(status_code=400, detail="A reason is required for a recheck")
+    if not body and not attachments:
         raise HTTPException(status_code=400, detail="Comment body is required")
     case = _resolve_case(db, report_id)
+    for a in attachments:
+        if (a.size or 0) > MAX_ATTACHMENT_BYTES:
+            raise HTTPException(status_code=400, detail="File must be 5 MB or smaller")
+        # only files uploaded under this case
+        p = a.path or ""
+        if ".." in p or (str(case.id) not in p and str(report_id) not in p):
+            raise HTTPException(status_code=400, detail="Attachment does not belong to this case")
     _require_case_access(db, current_user, case)
     if current_user.role not in ("SUPER_ADMIN", "MANAGER", "CENTER", "DOCTOR"):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
@@ -367,8 +413,11 @@ async def add_comment(
         case_id=case.id,
         study_id=study_id,
         user=current_user,
-        kind="COMMENT",
-        body=body,
+        kind=kind,
+        body=body + (
+            ATTACH_MARK + json.dumps([{"path": a.path, "name": (a.name or "file")[:200], "size": a.size} for a in attachments])
+            if attachments else ""
+        ),
     )
     db.commit()
     db.refresh(row)
@@ -384,7 +433,9 @@ async def add_comment(
     # Bell + live notice: center user(s), Super Admins, Managers and the
     # assigned doctor(s); never the sender.
     await notif_svc.notify_case_message(
-        db, case, [s.claimed_by for s in studies], current_user, body
+        db, case, [s.claimed_by for s in studies], current_user,
+        ({"RECHECK_REQ": "Recheck requested: ", "OTHER": "Other: "}.get(kind, "") + body)
+        or f"Sent {len(attachments)} file(s)",
     )
     return result
 

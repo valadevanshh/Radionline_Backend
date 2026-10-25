@@ -219,8 +219,17 @@ class ApprovalResponse(BaseModel):
 
 
 # Case activity thread (Priority 6): flags, reassign, recheck, comments
+class CommentAttachment(BaseModel):
+    path: str
+    name: str
+    size: Optional[int] = None
+
+
 class ReportCommentCreate(BaseModel):
-    body: str
+    body: str = ""
+    # COMMENT (default) | RECHECK_REQ (ask the doctor to recheck; reason required) | OTHER
+    kind: Optional[str] = None
+    attachments: Optional[List[CommentAttachment]] = None
 
 
 class FlagReassignRequest(BaseModel):
@@ -239,8 +248,9 @@ class ReportCommentResponse(BaseModel):
     authorUserId: Optional[int] = None
     authorRole: str
     authorName: str
-    kind: str  # FLAG | REASSIGN | RECHECK | COMMENT
+    kind: str  # FLAG | REASSIGN | RECHECK | COMMENT | RECHECK_REQ | OTHER
     body: str
+    attachments: List[dict] = []
     fromDoctorId: Optional[str] = None
     toDoctorId: Optional[str] = None
     createdAt: str
