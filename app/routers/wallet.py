@@ -293,7 +293,11 @@ class DecisionIn(BaseModel):
 
 @router.get("/centers")
 def list_center_wallets(db: Session = Depends(get_db), _u: UserDB = Depends(require_roles("SUPER_ADMIN"))):
-    centers = db.query(CenterDB).order_by(CenterDB.center_name.asc()).all()
+    try:
+        from app.soft_delete import active_filter
+    except ImportError:
+        from app.soft_delete import active_filter
+    centers = active_filter(db.query(CenterDB), CenterDB).order_by(CenterDB.center_name.asc()).all()
     return [_summary(db, c, detail=False) for c in centers]
 
 

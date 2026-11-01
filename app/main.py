@@ -79,6 +79,15 @@ try:
 except Exception as e:
     logger.warning(f"Study report columns ensure skipped: {e}")
 
+try:
+    from app.soft_delete import ensure_soft_delete_columns
+except ImportError:
+    from app.soft_delete import ensure_soft_delete_columns
+try:
+    ensure_soft_delete_columns(engine)
+except Exception as e:
+    logger.warning(f"Soft-delete columns ensure skipped: {e}")
+
 
 try:
     from app.report_links import ensure_report_link_tables

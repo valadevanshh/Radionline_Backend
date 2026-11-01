@@ -69,7 +69,11 @@ def _stored_expertise(value) -> list[str]:
 
 @router.get("", response_model=list[DoctorResponse])
 def get_doctors(db: Session = Depends(get_db)):
-    docs = db.query(DoctorDB).all()
+    try:
+        from app.soft_delete import active_filter
+    except ImportError:
+        from app.soft_delete import active_filter
+    docs = active_filter(db.query(DoctorDB), DoctorDB).all()
     return [db_to_schema(d) for d in docs]
 
 @router.post("", response_model=DoctorResponse)
@@ -482,7 +486,11 @@ def get_doctor_directory(
     db: Session = Depends(get_db),
     current_user: UserDB = Depends(require_roles(*DIRECTORY_ROLES)),
 ):
-    docs = db.query(DoctorDB).order_by(DoctorDB.full_name).all()
+    try:
+        from app.soft_delete import active_filter
+    except ImportError:
+        from app.soft_delete import active_filter
+    docs = active_filter(db.query(DoctorDB), DoctorDB).order_by(DoctorDB.full_name).all()
     rows = []
     for d in docs:
         row = db_to_schema(d)
@@ -529,8 +537,12 @@ async def delete_doctor(
     _current_user: UserDB = Depends(require_roles("SUPER_ADMIN", "MANAGER")),
 ):
     """Only Super Admin and Manager may delete. A Manager's delete waits for Super Admin approval (202)."""
+    try:
+        from app.soft_delete import is_deleted
+    except ImportError:
+        from app.soft_delete import is_deleted
     doc = db.query(DoctorDB).filter(DoctorDB.id == doctor_id).first()
-    if not doc:
+    if not doc or is_deleted(doc):
         raise HTTPException(status_code=404, detail="Doctor not found")
     if _current_user.role == "MANAGER":
         try:
@@ -552,7 +564,10 @@ async def delete_doctor(
 
 
 def delete_doctor_core(db: Session, doctor_id: str) -> None:
-    doc = db.query(DoctorDB).filter(DoctorDB.id == doctor_id).first()
-    if doc:
-        db.delete(doc)
+    """Soft-delete the doctor profile and any linked doctor login."""
+    try:
+        from app.soft_delete import soft_delete_doctor_and_login
+    except ImportError:
+        from app.soft_delete import soft_delete_doctor_and_login
+    soft_delete_doctor_and_login(db, doctor_id)
     db.commit()

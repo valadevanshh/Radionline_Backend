@@ -123,7 +123,11 @@ def _user_out(db: Session, u: UserDB, visible: Optional[List[str]]) -> dict:
 def _check_links(db: Session, links: List[CenterLink], manageable: Optional[List[str]]) -> List[CenterLink]:
     seen = set()
     out = []
-    existing = {c.id for c in db.query(CenterDB.id).all()}
+    try:
+        from app.soft_delete import active_filter
+    except ImportError:
+        from app.soft_delete import active_filter
+    existing = {c.id for c in active_filter(db.query(CenterDB), CenterDB).all()}
     for l in links:
         cid = (l.centerId or "").strip()
         if not cid or cid in seen:
@@ -155,15 +159,21 @@ def _validate_password(pw: Optional[str]) -> None:
 
 @router.get("")
 def list_center_users(db: Session = Depends(get_db), current_user: UserDB = Depends(get_current_user)):
+    try:
+        from app.soft_delete import active_filter, is_deleted, user_may_login
+    except ImportError:
+        from app.soft_delete import active_filter, is_deleted, user_may_login
     manageable = _manageable(db, current_user)
-    users = db.query(UserDB).filter(UserDB.role == "CENTER").order_by(UserDB.name.asc()).all()
+    users = active_filter(db.query(UserDB).filter(UserDB.role == "CENTER"), UserDB).order_by(UserDB.name.asc()).all()
     out = []
     for u in users:
+        if is_deleted(u) or not user_may_login(db, u):
+            continue
         links = _links_of(db, u)
         if manageable is not None and not any(l["centerId"] in manageable for l in links):
             continue
         out.append(_user_out(db, u, manageable))
-    centers_q = db.query(CenterDB)
+    centers_q = active_filter(db.query(CenterDB), CenterDB)
     if manageable is not None:
         centers_q = centers_q.filter(CenterDB.id.in_(manageable))
     centers = sorted(({"centerId": c.id, "centerName": c.center_name} for c in centers_q.all()),

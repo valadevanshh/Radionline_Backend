@@ -17,6 +17,7 @@ class UserDB(Base):
     name = Column(String(255), nullable=False)
     role = Column(String(50), nullable=False)  # SUPER_ADMIN, DOCTOR, CENTER, MANAGER
     metadata_ = Column("metadata", JSON_TYPE, nullable=True, default={})
+    deleted_at = Column(String(50), nullable=True, index=True)
 
 class DoctorDB(Base):
     __tablename__ = "doctors"
@@ -31,6 +32,7 @@ class DoctorDB(Base):
     contact_number = Column(String(50), nullable=False)
     created_at = Column(String(50), nullable=False)
     metadata_ = Column("metadata", JSON_TYPE, nullable=True, default={})
+    deleted_at = Column(String(50), nullable=True, index=True)
 
 class CenterDB(Base):
     __tablename__ = "radiology_centers"
@@ -42,6 +44,7 @@ class CenterDB(Base):
     contact_number = Column(String(50), nullable=False)
     created_at = Column(String(50), nullable=False)
     metadata_ = Column("metadata", JSON_TYPE, nullable=True, default={})
+    deleted_at = Column(String(50), nullable=True, index=True)
 
 class CaseDB(Base):
     __tablename__ = "cases"
@@ -62,6 +65,7 @@ class CaseDB(Base):
     study_date = Column(String(50), nullable=False)
     created_at = Column(String(50), nullable=False)
     metadata_ = Column("metadata", JSON_TYPE, nullable=True, default={})
+    deleted_at = Column(String(50), nullable=True, index=True)
 
 class StudyDB(Base):
     __tablename__ = "studies"

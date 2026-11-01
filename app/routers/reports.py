@@ -501,9 +501,15 @@ def get_reports(
         from app.routers.study_reports import (
             case_studies_ordered, enrich_case_item, worklist_sort_key,
         )
+    try:
+        from app.soft_delete import is_deleted
+    except ImportError:
+        from app.soft_delete import is_deleted
     res = []
     for r in reports:
         case = db.query(CaseDB).filter(CaseDB.id == r.id).first()
+        if case and is_deleted(case):
+            continue
         studies = case_studies_ordered(db, r.id) if case else []
         item = db_to_schema(r)
         if case:
@@ -527,11 +533,19 @@ def get_report(
         from app.routers.study_reports import case_studies_ordered, enrich_case_item
         from app.routers.case_thread import _can_access_case
 
+    try:
+        from app.soft_delete import is_deleted
+    except ImportError:
+        from app.soft_delete import is_deleted
+
     case = db.query(CaseDB).filter(CaseDB.id == report_id).first()
     if not case:
         study = db.query(StudyDB).filter(StudyDB.id == report_id).first()
         if study:
             case = db.query(CaseDB).filter(CaseDB.id == study.case_id).first()
+
+    if case and is_deleted(case):
+        raise HTTPException(status_code=404, detail="Report not found")
 
     if case:
         if not _can_access_case(db, current_user, case):

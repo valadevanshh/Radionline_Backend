@@ -87,30 +87,16 @@ def resolve_case_id(db: Session, any_id: str) -> Optional[str]:
 
 
 def delete_case_cascade(db: Session, case_id: str) -> dict:
-    """Delete a patient case and everything that hangs off it. Does NOT commit.
+    """Soft-delete a patient case. Does NOT commit.
 
-    Removed: study images, doctor alerts (study_notifications), studies, the case,
-    the legacy report row, case activity thread, public QR links, PACS annotations
-    and bell notifications pointing at the case.
-    Kept on purpose: invoice line items (billing history is immutable) and the
-    uploaded files on disk."""
-    study_ids = [r[0] for r in db.query(StudyDB.id).filter(StudyDB.case_id == case_id).all()]
-    counts = {}
-    img_keys = study_ids + [case_id]  # legacy images were keyed by the case id
-    counts["study_images"] = db.query(StudyImageDB).filter(StudyImageDB.study_id.in_(img_keys)).delete(synchronize_session=False)
-    if study_ids:
-        counts["study_notifications"] = db.query(StudyNotificationDB).filter(
-            StudyNotificationDB.study_id.in_(study_ids)).delete(synchronize_session=False)
-    else:
-        counts["study_notifications"] = 0
-    counts["report_comments"] = db.query(ReportCommentDB).filter(ReportCommentDB.case_id == case_id).delete(synchronize_session=False)
-    counts["report_public_links"] = db.query(ReportPublicLinkDB).filter(ReportPublicLinkDB.case_id == case_id).delete(synchronize_session=False)
-    counts["image_annotations"] = db.query(ImageAnnotationDB).filter(ImageAnnotationDB.case_id == case_id).delete(synchronize_session=False)
-    counts["user_notifications"] = db.query(UserNotificationDB).filter(UserNotificationDB.case_id == case_id).delete(synchronize_session=False)
-    counts["studies"] = db.query(StudyDB).filter(StudyDB.case_id == case_id).delete(synchronize_session=False)
-    counts["cases"] = db.query(CaseDB).filter(CaseDB.id == case_id).delete(synchronize_session=False)
-    counts["xray_reports"] = db.query(ReportDB).filter(ReportDB.id == case_id).delete(synchronize_session=False)
-    return counts
+    The case is marked deleted_at so it disappears from live lists. Studies,
+    images, annotations, invoice lines and files on disk are kept for history.
+    """
+    try:
+        from app.soft_delete import soft_delete_case
+    except ImportError:
+        from app.soft_delete import soft_delete_case
+    return soft_delete_case(db, case_id)
 
 
 def case_details_snapshot(case: CaseDB) -> dict:

@@ -108,6 +108,16 @@ def get_current_user(
             detail="User not found",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    try:
+        from app.soft_delete import user_may_login
+    except ImportError:
+        from app.soft_delete import user_may_login
+    if not user_may_login(db, user):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="This account is no longer active",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     # Password reset by an admin ends sessions issued before it (no iat = issued before this check existed)
     changed = (user.metadata_ or {}).get("passwordChangedAt")
     if changed:

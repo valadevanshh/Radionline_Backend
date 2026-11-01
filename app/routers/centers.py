@@ -52,7 +52,11 @@ def get_centers(
     current_user: UserDB = Depends(get_current_user),
 ):
     """Every centre for staff and doctors; a centre-side login only sees the centres it is linked to."""
-    q = db.query(CenterDB)
+    try:
+        from app.soft_delete import active_filter
+    except ImportError:
+        from app.soft_delete import active_filter
+    q = active_filter(db.query(CenterDB), CenterDB)
     ids = access_svc.linked_center_ids(db, current_user) if current_user.role == "CENTER" else None
     if ids is not None:
         if not ids:
@@ -287,8 +291,12 @@ async def delete_center(
     _current_user: UserDB = Depends(require_roles("SUPER_ADMIN", "MANAGER")),
 ):
     """Only Super Admin and Manager may delete. A Manager's delete waits for Super Admin approval (202)."""
+    try:
+        from app.soft_delete import is_deleted
+    except ImportError:
+        from app.soft_delete import is_deleted
     center = db.query(CenterDB).filter(CenterDB.id == center_id).first()
-    if not center:
+    if not center or is_deleted(center):
         raise HTTPException(status_code=404, detail="Center not found")
     if _current_user.role == "MANAGER":
         try:
@@ -310,15 +318,12 @@ async def delete_center(
 
 
 def delete_center_core(db: Session, center_id: str) -> None:
-    """Delete the centre, its rate card and its user links. Cases, invoices and the
-    centre's login rows stay (history); linked logins lose access to this centre."""
-    center = db.query(CenterDB).filter(CenterDB.id == center_id).first()
-    if center:
-        db.delete(center)
+    """Soft-delete the centre. Pricing/access links cleared; orphaned centre logins
+    (no remaining live centre) are soft-deleted so they cannot sign in or appear
+    under Center Users. Cases and invoices stay for history."""
     try:
-        from app.models import CenterPricingDB
+        from app.soft_delete import soft_delete_center_and_orphaned_logins
     except ImportError:
-        from app.models import CenterPricingDB
-    db.query(CenterPricingDB).filter(CenterPricingDB.center_id == center_id).delete(synchronize_session=False)
-    access_svc.unlink_center_everywhere(db, center_id)
+        from app.soft_delete import soft_delete_center_and_orphaned_logins
+    soft_delete_center_and_orphaned_logins(db, center_id)
     db.commit()

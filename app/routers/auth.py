@@ -38,6 +38,15 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password",
         )
+    try:
+        from app.soft_delete import user_may_login
+    except ImportError:
+        from app.soft_delete import user_may_login
+    if not user_may_login(db, user):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="This account is no longer active",
+        )
     meta = dict(user.metadata_ or {})
     stored = meta.get("password") or ""
     if not stored or not verify_password(payload.password, stored):
@@ -94,7 +103,11 @@ def get_all_users(
     db: Session = Depends(get_db),
     _current_user: UserDB = Depends(require_roles("SUPER_ADMIN", "MANAGER")),
 ):
-    users = db.query(UserDB).all()
+    try:
+        from app.soft_delete import active_filter
+    except ImportError:
+        from app.soft_delete import active_filter
+    users = active_filter(db.query(UserDB), UserDB).all()
     return [user_public_dict(u) for u in users]
 
 

@@ -360,7 +360,12 @@ async def _apply_approved(appr: PendingApprovalDB, p: dict, db: Session, reviewe
             doctors_router.delete_doctor_core(db, eid)
             return {"event": "DOCTOR_DELETED", "doctorId": eid}
         if at.startswith("UPDATE"):
-            if not db.query(DoctorDB).filter(DoctorDB.id == eid).first():
+            try:
+                from app.soft_delete import is_deleted
+            except ImportError:
+                from app.soft_delete import is_deleted
+            doc_row = db.query(DoctorDB).filter(DoctorDB.id == eid).first()
+            if not doc_row or is_deleted(doc_row):
                 raise HTTPException(status_code=409, detail="This doctor no longer exists")
             doctors_router.save_doctor_core(DoctorCreate(**{**p, "id": eid}), db)
             return {"event": "DOCTOR_UPDATED", "doctorId": eid}
@@ -372,7 +377,12 @@ async def _apply_approved(appr: PendingApprovalDB, p: dict, db: Session, reviewe
             centers_router.delete_center_core(db, eid)
             return {"event": "CENTER_DELETED", "centerId": eid}
         if at.startswith("UPDATE"):
-            if not db.query(CenterDB).filter(CenterDB.id == eid).first():
+            try:
+                from app.soft_delete import is_deleted
+            except ImportError:
+                from app.soft_delete import is_deleted
+            center_row = db.query(CenterDB).filter(CenterDB.id == eid).first()
+            if not center_row or is_deleted(center_row):
                 raise HTTPException(status_code=409, detail="This centre no longer exists")
             centers_router.save_center_core(CenterCreate(**{**p, "id": eid}), db)
             return {"event": "CENTER_UPDATED", "centerId": eid}
@@ -712,7 +722,11 @@ def _prepare_doctor_signature(value):
 def _apply_doctor_action(action_type: str, entity_id: Optional[str], p: dict, db: Session):
     doc_id = entity_id or p.get("id") or f"doc-{int(time.time() * 1000)}"
     if action_type.startswith("DELETE"):
-        db.query(DoctorDB).filter(DoctorDB.id == doc_id).delete()
+        try:
+            from app.soft_delete import soft_delete_doctor_and_login
+        except ImportError:
+            from app.soft_delete import soft_delete_doctor_and_login
+        soft_delete_doctor_and_login(db, doc_id)
         return
 
     doc = db.query(DoctorDB).filter(DoctorDB.id == doc_id).first()
@@ -807,7 +821,11 @@ def _apply_doctor_action(action_type: str, entity_id: Optional[str], p: dict, db
 def _apply_center_action(action_type: str, entity_id: Optional[str], p: dict, db: Session):
     center_id = entity_id or p.get("id") or f"center-{int(time.time() * 1000)}"
     if action_type.startswith("DELETE"):
-        db.query(CenterDB).filter(CenterDB.id == center_id).delete()
+        try:
+            from app.soft_delete import soft_delete_center_and_orphaned_logins
+        except ImportError:
+            from app.soft_delete import soft_delete_center_and_orphaned_logins
+        soft_delete_center_and_orphaned_logins(db, center_id)
         return
 
     c = db.query(CenterDB).filter(CenterDB.id == center_id).first()
