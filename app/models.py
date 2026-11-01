@@ -18,6 +18,7 @@ class UserDB(Base):
     role = Column(String(50), nullable=False)  # SUPER_ADMIN, DOCTOR, CENTER, MANAGER
     metadata_ = Column("metadata", JSON_TYPE, nullable=True, default={})
     deleted_at = Column(String(50), nullable=True, index=True)
+    frozen_at = Column(String(50), nullable=True, index=True)
 
 class DoctorDB(Base):
     __tablename__ = "doctors"
@@ -33,6 +34,7 @@ class DoctorDB(Base):
     created_at = Column(String(50), nullable=False)
     metadata_ = Column("metadata", JSON_TYPE, nullable=True, default={})
     deleted_at = Column(String(50), nullable=True, index=True)
+    frozen_at = Column(String(50), nullable=True, index=True)
 
 class CenterDB(Base):
     __tablename__ = "radiology_centers"
@@ -45,6 +47,7 @@ class CenterDB(Base):
     created_at = Column(String(50), nullable=False)
     metadata_ = Column("metadata", JSON_TYPE, nullable=True, default={})
     deleted_at = Column(String(50), nullable=True, index=True)
+    frozen_at = Column(String(50), nullable=True, index=True)
 
 class CaseDB(Base):
     __tablename__ = "cases"
@@ -168,6 +171,25 @@ class PendingApprovalDB(Base):
     created_at = Column(String(50), nullable=False)
     reviewed_at = Column(String(50), nullable=True)
     reviewed_by = Column(String(255), nullable=True)
+
+
+class AuditLogDB(Base):
+    """Durable edit log for doctors / centres / centre users (freeze, CRUD, approvals)."""
+    __tablename__ = "audit_logs"
+    __table_args__ = {'extend_existing': True}
+
+    id = Column(String(100), primary_key=True, index=True)
+    at = Column(String(50), nullable=False, index=True)
+    actor_user_id = Column(Integer, nullable=True, index=True)
+    actor_name = Column(String(255), nullable=True)
+    actor_role = Column(String(50), nullable=True)
+    entity_type = Column(String(50), nullable=False, index=True)  # doctor | center | center_user
+    entity_id = Column(String(100), nullable=False, index=True)
+    action = Column(String(50), nullable=False, index=True)  # CREATE|UPDATE|DELETE|RESTORE|FREEZE|UNFREEZE|APPROVE|REJECT
+    before = Column(JSON_TYPE, nullable=True)
+    after = Column(JSON_TYPE, nullable=True)
+    approval_id = Column(String(100), nullable=True, index=True)
+    note = Column(Text, nullable=True)
 
 
 class BillingPeriodLockDB(Base):

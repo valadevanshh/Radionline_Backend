@@ -179,6 +179,19 @@ def _snapshot_template(tmpl_id: str, db: Session) -> Optional[dict]:
     }
 
 
+def _snapshot_center_user(user_id: str, db: Session) -> Optional[dict]:
+    try:
+        from app.entity_lifecycle import snapshot_center_user_row
+    except ImportError:
+        from app.entity_lifecycle import snapshot_center_user_row
+    try:
+        uid = int(user_id)
+    except (TypeError, ValueError):
+        return None
+    u = db.query(UserDB).filter(UserDB.id == uid, UserDB.role == "CENTER").first()
+    return snapshot_center_user_row(u)
+
+
 def _current_entity_snapshot(entity_type: str, entity_id: Optional[str], action_type: str, db: Session) -> Optional[dict]:
     """Load current DB values for before/after diffs. CREATE has no before."""
     if not entity_id:
@@ -187,11 +200,13 @@ def _current_entity_snapshot(entity_type: str, entity_id: Optional[str], action_
     if at.startswith("CREATE"):
         return None
     et = (entity_type or "").lower()
-    if et == "case" or "CASE" in at:
+    if et == "case" or ("CASE" in at and "CENTER" not in at):
         return _snapshot_case(entity_id, db)
     if et == "doctor" or "DOCTOR" in at:
         return _snapshot_doctor(entity_id, db)
-    if et == "center" or "CENTER" in at:
+    if et in ("center_user", "center-user") or "CENTER_USER" in at:
+        return _snapshot_center_user(entity_id, db)
+    if et == "center" or ("CENTER" in at and "CENTER_USER" not in at):
         return _snapshot_center(entity_id, db)
     if et == "template" or "TEMPLATE" in at:
         return _snapshot_template(entity_id, db)
@@ -356,37 +371,169 @@ async def _apply_approved(appr: PendingApprovalDB, p: dict, db: Session, reviewe
         return {"event": "NEW_REPORT", "caseId": eid}
 
     if et == "doctor" or "DOCTOR" in at:
+        if at in ("FREEZE_DOCTOR", "UNFREEZE_DOCTOR"):
+            try:
+                from app.entity_lifecycle import set_doctor_frozen
+            except ImportError:
+                from app.entity_lifecycle import set_doctor_frozen
+            frozen = at == "FREEZE_DOCTOR"
+            if "frozen" in p:
+                frozen = bool(p.get("frozen"))
+            set_doctor_frozen(db, eid, frozen, actor=reviewer, approval_id=appr.id)
+            return {"event": "DOCTOR_FROZEN" if frozen else "DOCTOR_UNFROZEN", "doctorId": eid}
         if at.startswith("DELETE"):
+            try:
+                from app.entity_lifecycle import write_audit, snapshot_doctor_row
+            except ImportError:
+                from app.entity_lifecycle import write_audit, snapshot_doctor_row
+            before = snapshot_doctor_row(db.query(DoctorDB).filter(DoctorDB.id == eid).first())
             doctors_router.delete_doctor_core(db, eid)
+            write_audit(
+                db, actor=reviewer, entity_type="doctor", entity_id=eid, action="DELETE",
+                before=before, after=None, approval_id=appr.id, commit=True,
+            )
             return {"event": "DOCTOR_DELETED", "doctorId": eid}
         if at.startswith("UPDATE"):
             try:
                 from app.soft_delete import is_deleted
+                from app.entity_lifecycle import write_audit, snapshot_doctor_row
             except ImportError:
                 from app.soft_delete import is_deleted
+                from app.entity_lifecycle import write_audit, snapshot_doctor_row
             doc_row = db.query(DoctorDB).filter(DoctorDB.id == eid).first()
             if not doc_row or is_deleted(doc_row):
                 raise HTTPException(status_code=409, detail="This doctor no longer exists")
+            before = snapshot_doctor_row(doc_row)
             doctors_router.save_doctor_core(DoctorCreate(**{**p, "id": eid}), db)
+            write_audit(
+                db, actor=reviewer, entity_type="doctor", entity_id=eid, action="UPDATE",
+                before=before, after=snapshot_doctor_row(db.query(DoctorDB).filter(DoctorDB.id == eid).first()),
+                approval_id=appr.id, commit=True,
+            )
             return {"event": "DOCTOR_UPDATED", "doctorId": eid}
+        try:
+            from app.entity_lifecycle import write_audit, snapshot_doctor_row
+        except ImportError:
+            from app.entity_lifecycle import write_audit, snapshot_doctor_row
         _apply_doctor_action(appr.action_type, appr.entity_id, p, db)
+        new_id = eid or (p.get("id") if isinstance(p, dict) else None)
+        if new_id:
+            write_audit(
+                db, actor=reviewer, entity_type="doctor", entity_id=str(new_id), action="CREATE",
+                before=None, after=snapshot_doctor_row(db.query(DoctorDB).filter(DoctorDB.id == new_id).first()),
+                approval_id=appr.id, commit=True,
+            )
         return {"event": "DOCTOR_CREATED"}
 
-    if et == "center" or "CENTER" in at:
+    if et in ("center_user", "center-user") or "CENTER_USER" in at:
+        try:
+            from app.routers import center_users as cu_router
+            from app.entity_lifecycle import set_center_user_frozen, write_audit, snapshot_center_user_row
+        except ImportError:
+            from app.routers import center_users as cu_router
+            from app.entity_lifecycle import set_center_user_frozen, write_audit, snapshot_center_user_row
+        if at in ("FREEZE_CENTER_USER", "UNFREEZE_CENTER_USER"):
+            uid = int(eid or p.get("id"))
+            frozen = at.startswith("FREEZE") and not at.startswith("UNFREEZE")
+            if "frozen" in p:
+                frozen = bool(p.get("frozen"))
+            set_center_user_frozen(db, uid, frozen, actor=reviewer, approval_id=appr.id)
+            return {"event": "CENTER_USER_FROZEN" if frozen else "CENTER_USER_UNFROZEN", "userId": uid}
         if at.startswith("DELETE"):
+            uid = int(eid or p.get("id"))
+            before = snapshot_center_user_row(db.query(UserDB).filter(UserDB.id == uid).first())
+            cu_router.soft_delete_center_user_core(db, uid)
+            write_audit(
+                db, actor=reviewer, entity_type="center_user", entity_id=str(uid), action="DELETE",
+                before=before, after=None, approval_id=appr.id, commit=True,
+            )
+            return {"event": "CENTER_USER_DELETED", "userId": uid}
+        if at.startswith("UNLINK"):
+            uid = int(eid or p.get("id"))
+            cid = p.get("centerId")
+            cu_router.unlink_center_user_core(db, uid, cid, actor=reviewer)
+            return {"event": "CENTER_USER_UNLINKED", "userId": uid, "centerId": cid}
+        if at.startswith("UPDATE"):
+            uid = int(eid or p.get("id"))
+            body = cu_router.CenterUserUpdate(**{k: v for k, v in p.items() if k in ("name", "password", "centers")})
+            before = snapshot_center_user_row(db.query(UserDB).filter(UserDB.id == uid).first())
+            cu_router.update_center_user_core(uid, body, db, reviewer, None)
+            write_audit(
+                db, actor=reviewer, entity_type="center_user", entity_id=str(uid), action="UPDATE",
+                before=before, after=snapshot_center_user_row(db.query(UserDB).filter(UserDB.id == uid).first()),
+                approval_id=appr.id, commit=True,
+            )
+            return {"event": "CENTER_USER_UPDATED", "userId": uid}
+        # CREATE
+        from app.security import looks_like_bcrypt
+        create_body = cu_router.CenterUserCreate(**{
+            k: v for k, v in p.items() if k in ("name", "email", "password", "centers")
+        })
+        # password already hashed when staged
+        result = cu_router.create_center_user_core(create_body, db, reviewer, None)
+        uid = result["user"]["id"]
+        write_audit(
+            db, actor=reviewer, entity_type="center_user", entity_id=str(uid), action="CREATE",
+            before=None, after=snapshot_center_user_row(db.query(UserDB).filter(UserDB.id == uid).first()),
+            approval_id=appr.id, commit=True,
+        )
+        return {"event": "CENTER_USER_CREATED", "userId": uid}
+
+    if et == "center" or ("CENTER" in at and "CENTER_USER" not in at):
+        if at in ("FREEZE_CENTER", "UNFREEZE_CENTER") or (
+            ("FREEZE" in at or "UNFREEZE" in at) and "CENTER" in at and "CENTER_USER" not in at
+        ):
+            try:
+                from app.entity_lifecycle import set_center_frozen
+            except ImportError:
+                from app.entity_lifecycle import set_center_frozen
+            frozen = at.startswith("FREEZE") and not at.startswith("UNFREEZE")
+            if "frozen" in p:
+                frozen = bool(p.get("frozen"))
+            set_center_frozen(db, eid, frozen, actor=reviewer, approval_id=appr.id)
+            return {"event": "CENTER_FROZEN" if frozen else "CENTER_UNFROZEN", "centerId": eid}
+        if at.startswith("DELETE"):
+            try:
+                from app.entity_lifecycle import write_audit, snapshot_center_row
+            except ImportError:
+                from app.entity_lifecycle import write_audit, snapshot_center_row
+            before = snapshot_center_row(db.query(CenterDB).filter(CenterDB.id == eid).first())
             centers_router.delete_center_core(db, eid)
+            write_audit(
+                db, actor=reviewer, entity_type="center", entity_id=eid, action="DELETE",
+                before=before, after=None, approval_id=appr.id, commit=True,
+            )
             return {"event": "CENTER_DELETED", "centerId": eid}
         if at.startswith("UPDATE"):
             try:
                 from app.soft_delete import is_deleted
+                from app.entity_lifecycle import write_audit, snapshot_center_row
             except ImportError:
                 from app.soft_delete import is_deleted
+                from app.entity_lifecycle import write_audit, snapshot_center_row
             center_row = db.query(CenterDB).filter(CenterDB.id == eid).first()
             if not center_row or is_deleted(center_row):
                 raise HTTPException(status_code=409, detail="This centre no longer exists")
+            before = snapshot_center_row(center_row)
             centers_router.save_center_core(CenterCreate(**{**p, "id": eid}), db)
+            write_audit(
+                db, actor=reviewer, entity_type="center", entity_id=eid, action="UPDATE",
+                before=before, after=snapshot_center_row(db.query(CenterDB).filter(CenterDB.id == eid).first()),
+                approval_id=appr.id, commit=True,
+            )
             return {"event": "CENTER_UPDATED", "centerId": eid}
+        try:
+            from app.entity_lifecycle import write_audit, snapshot_center_row
+        except ImportError:
+            from app.entity_lifecycle import write_audit, snapshot_center_row
         _apply_center_action(appr.action_type, appr.entity_id, p, db)
+        new_id = eid or (p.get("id") if isinstance(p, dict) else None)
+        if new_id:
+            write_audit(
+                db, actor=reviewer, entity_type="center", entity_id=str(new_id), action="CREATE",
+                before=None, after=snapshot_center_row(db.query(CenterDB).filter(CenterDB.id == new_id).first()),
+                approval_id=appr.id, commit=True,
+            )
         return {"event": "CENTER_CREATED"}
 
     if et == "template" or "TEMPLATE" in at:
@@ -492,6 +639,25 @@ async def reject_request(
     appr.rejection_reason = reason
     appr.reviewed_at = datetime.utcnow().isoformat()
     appr.reviewed_by = reviewer_name
+
+    et = (appr.entity_type or "").lower()
+    if et in ("doctor", "center", "center_user", "center-user") or "DOCTOR" in (appr.action_type or "") or "CENTER" in (appr.action_type or ""):
+        try:
+            from app.entity_lifecycle import write_audit
+        except ImportError:
+            from app.entity_lifecycle import write_audit
+        write_audit(
+            db, actor=_user,
+            entity_type="center_user" if ("CENTER_USER" in (appr.action_type or "").upper() or et in ("center_user", "center-user")) else (
+                "doctor" if ("DOCTOR" in (appr.action_type or "").upper() or et == "doctor") else "center"
+            ),
+            entity_id=str(appr.entity_id or (appr.payload or {}).get("id") or "unknown"),
+            action="REJECT",
+            before=_current_entity_snapshot(appr.entity_type, appr.entity_id, appr.action_type, db),
+            after=None,
+            approval_id=appr.id,
+            note=reason,
+        )
     
     db.commit()
     db.refresh(appr)

@@ -88,6 +88,15 @@ try:
 except Exception as e:
     logger.warning(f"Soft-delete columns ensure skipped: {e}")
 
+try:
+    from app.entity_lifecycle import ensure_freeze_and_audit_tables
+except ImportError:
+    from app.entity_lifecycle import ensure_freeze_and_audit_tables
+try:
+    ensure_freeze_and_audit_tables(engine)
+except Exception as e:
+    logger.warning(f"Freeze/audit tables ensure skipped: {e}")
+
 
 try:
     from app.report_links import ensure_report_link_tables
@@ -138,6 +147,11 @@ app.include_router(annotations.router, prefix=settings.API_PREFIX)
 app.include_router(admin_users.router, prefix=settings.API_PREFIX)
 app.include_router(payees_router.router, prefix=settings.API_PREFIX)
 app.include_router(wallet_router.router, prefix=settings.API_PREFIX)
+try:
+    from app.routers import audit_log as audit_log_router
+except ImportError:
+    from app.routers import audit_log as audit_log_router
+app.include_router(audit_log_router.router, prefix=settings.API_PREFIX)
 
 
 from fastapi import WebSocket, WebSocketDisconnect, Query

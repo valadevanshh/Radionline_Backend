@@ -93,6 +93,12 @@ def mark_deleted(row, when: Optional[str] = None) -> None:
     row.deleted_at = when or now_iso()
 
 
+def clear_deleted(row) -> None:
+    if row is None:
+        return
+    row.deleted_at = None
+
+
 def active_filter(query: Query, model) -> Query:
     """Exclude soft-deleted rows. Safe when deleted_at column is present."""
     col = getattr(model, "deleted_at", None)
@@ -124,19 +130,21 @@ def soft_delete_doctor_and_login(db: Session, doctor_id: str) -> None:
 
 
 def soft_delete_center_and_orphaned_logins(db: Session, center_id: str) -> None:
-    """Soft-delete the centre, drop access links, soft-delete logins left with no live centre."""
+    """Soft-delete the centre, drop access links, soft-delete logins left with no live centre.
+
+    Pricing rows are left in place (no hard delete) under the soft-deleted centre.
+    """
     try:
-        from app.models import CenterDB, CenterPricingDB, UserDB, UserCenterAccessDB
+        from app.models import CenterDB, UserDB, UserCenterAccessDB
         from app import access as access_svc
     except ImportError:
-        from app.models import CenterDB, CenterPricingDB, UserDB, UserCenterAccessDB
+        from app.models import CenterDB, UserDB, UserCenterAccessDB
         from app import access as access_svc
 
     center = db.query(CenterDB).filter(CenterDB.id == center_id).first()
     if center and not is_deleted(center):
         mark_deleted(center)
 
-    db.query(CenterPricingDB).filter(CenterPricingDB.center_id == center_id).delete(synchronize_session=False)
     access_svc.unlink_center_everywhere(db, center_id)
 
     # Soft-delete CENTER logins that no longer have any non-deleted centre
@@ -178,18 +186,19 @@ def soft_delete_case(db: Session, case_id: str) -> dict:
 
 
 def user_may_login(db: Session, user) -> bool:
-    """False when the account (or its only centres / doctor) is soft-deleted."""
+    """False when the account is soft-deleted or frozen, or its only centres / doctor are."""
     if user is None or is_deleted(user):
+        return False
+    if getattr(user, "frozen_at", None):
         return False
     try:
         from app.models import CenterDB, DoctorDB, UserCenterAccessDB
+        from app.entity_lifecycle import center_is_usable
     except ImportError:
         from app.models import CenterDB, DoctorDB, UserCenterAccessDB
+        from app.entity_lifecycle import center_is_usable
 
     if user.role == "CENTER":
-        active_center_ids = {
-            c.id for c in active_filter(db.query(CenterDB), CenterDB).all()
-        }
         link_ids = [
             r.center_id
             for r in db.query(UserCenterAccessDB).filter(UserCenterAccessDB.user_id == user.id).all()
@@ -198,7 +207,10 @@ def user_may_login(db: Session, user) -> bool:
             cid = (user.metadata_ or {}).get("centerId")
             if cid:
                 link_ids = [str(cid)]
-        return any(cid in active_center_ids for cid in link_ids)
+        if not link_ids:
+            return False
+        centers = db.query(CenterDB).filter(CenterDB.id.in_(link_ids)).all()
+        return any(center_is_usable(c) for c in centers)
 
     if user.role == "DOCTOR":
         doc_id = (user.metadata_ or {}).get("doctorId")
@@ -207,6 +219,10 @@ def user_may_login(db: Session, user) -> bool:
         doc = db.query(DoctorDB).filter(DoctorDB.id == str(doc_id)).first()
         if doc is None:
             return True  # login without a doctor profile row still allowed
-        return not is_deleted(doc)
+        if is_deleted(doc):
+            return False
+        if getattr(doc, "frozen_at", None):
+            return False
+        return True
 
     return True

@@ -52,6 +52,7 @@ def db_to_schema(d: DoctorDB) -> dict:
         "expertise": _stored_expertise(meta.get("expertise")),
         "cvUrl": file_storage.public_url(meta.get("cvUrl")),
         "cvFileName": (meta.get("cvFileName") or "CV") if meta.get("cvUrl") else None,
+        "frozenAt": getattr(d, "frozen_at", None),
     }
 
 
@@ -99,7 +100,26 @@ async def save_doctor(
         )
         data = await announce_pending_approval(db, appr, _current_user)
         return pending_response(data, ("Edit" if exists else "New doctor") + " sent to the Super Admin for approval.")
-    return save_doctor_core(doc_in, db)
+    try:
+        from app.entity_lifecycle import write_audit, snapshot_doctor_row
+        from app.soft_delete import is_deleted
+    except ImportError:
+        from app.entity_lifecycle import write_audit, snapshot_doctor_row
+        from app.soft_delete import is_deleted
+    before = None
+    if doc_in.id:
+        prev = db.query(DoctorDB).filter(DoctorDB.id == doc_in.id).first()
+        if prev and not is_deleted(prev):
+            before = snapshot_doctor_row(prev)
+    saved = save_doctor_core(doc_in, db)
+    write_audit(
+        db, actor=_current_user, entity_type="doctor", entity_id=saved["id"],
+        action="UPDATE" if before else "CREATE", before=before, after=snapshot_doctor_row(
+            db.query(DoctorDB).filter(DoctorDB.id == saved["id"]).first()
+        ),
+        commit=True,
+    )
+    return saved
 
 
 def save_doctor_core(doc_in: DoctorCreate, db: Session) -> dict:
@@ -530,6 +550,54 @@ def update_doctor_profile(
     return _apply_profile_update(db, doc, body)
 
 
+class FreezeBody(BaseModel):
+    frozen: bool
+
+
+@router.put("/{doctor_id}/freeze", response_model=DoctorResponse)
+async def freeze_doctor(
+    doctor_id: str,
+    body: FreezeBody,
+    db: Session = Depends(get_db),
+    _current_user: UserDB = Depends(require_roles("SUPER_ADMIN", "MANAGER")),
+):
+    """Freeze/unfreeze a doctor. Manager stages for Super Admin approval (202)."""
+    try:
+        from app.soft_delete import is_deleted
+        from app.entity_lifecycle import set_doctor_frozen, snapshot_doctor_row
+    except ImportError:
+        from app.soft_delete import is_deleted
+        from app.entity_lifecycle import set_doctor_frozen, snapshot_doctor_row
+    doc = db.query(DoctorDB).filter(DoctorDB.id == doctor_id).first()
+    if not doc or is_deleted(doc):
+        raise HTTPException(status_code=404, detail="Doctor not found")
+    if _current_user.role == "MANAGER":
+        try:
+            from app.routers.approvals import (
+                create_pending_approval, announce_pending_approval, pending_response,
+            )
+        except ImportError:
+            from app.routers.approvals import (
+                create_pending_approval, announce_pending_approval, pending_response,
+            )
+        action = "FREEZE_DOCTOR" if body.frozen else "UNFREEZE_DOCTOR"
+        appr = create_pending_approval(
+            db, _current_user, action_type=action, entity_type="doctor",
+            entity_id=doctor_id, payload={"id": doctor_id, "frozen": bool(body.frozen)},
+        )
+        data = await announce_pending_approval(db, appr, _current_user)
+        return pending_response(
+            data,
+            ("Freeze" if body.frozen else "Unfreeze") + " request sent to the Super Admin for approval.",
+        )
+    try:
+        set_doctor_frozen(db, doctor_id, bool(body.frozen), actor=_current_user)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Doctor not found")
+    doc = db.query(DoctorDB).filter(DoctorDB.id == doctor_id).first()
+    return db_to_schema(doc)
+
+
 @router.delete("/{doctor_id}", status_code=204)
 async def delete_doctor(
     doctor_id: str,
@@ -539,8 +607,10 @@ async def delete_doctor(
     """Only Super Admin and Manager may delete. A Manager's delete waits for Super Admin approval (202)."""
     try:
         from app.soft_delete import is_deleted
+        from app.entity_lifecycle import write_audit, snapshot_doctor_row
     except ImportError:
         from app.soft_delete import is_deleted
+        from app.entity_lifecycle import write_audit, snapshot_doctor_row
     doc = db.query(DoctorDB).filter(DoctorDB.id == doctor_id).first()
     if not doc or is_deleted(doc):
         raise HTTPException(status_code=404, detail="Doctor not found")
@@ -559,7 +629,12 @@ async def delete_doctor(
         )
         data = await announce_pending_approval(db, appr, _current_user)
         return pending_response(data, "Delete request sent to the Super Admin for approval.")
+    before = snapshot_doctor_row(doc)
     delete_doctor_core(db, doctor_id)
+    write_audit(
+        db, actor=_current_user, entity_type="doctor", entity_id=doctor_id,
+        action="DELETE", before=before, after=None, commit=True,
+    )
     return None
 
 

@@ -62,6 +62,7 @@ class DoctorResponse(DoctorBase):
     id: str
     createdAt: str
     expertise: list[str] = []
+    frozenAt: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -86,6 +87,7 @@ class CenterCreate(CenterBase):
 class CenterResponse(CenterBase):
     id: str
     createdAt: str
+    frozenAt: Optional[str] = None
 
     class Config:
         from_attributes = True

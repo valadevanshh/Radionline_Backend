@@ -117,6 +117,7 @@ def _user_out(db: Session, u: UserDB, visible: Optional[List[str]]) -> dict:
         "centers": shown,
         "otherCenterCount": len([c for c in all_ids if visible is not None and c not in visible]),
         "canEditLogin": visible is None or all(c in visible for c in all_ids),
+        "frozenAt": getattr(u, "frozen_at", None),
     }
 
 
@@ -160,14 +161,14 @@ def _validate_password(pw: Optional[str]) -> None:
 @router.get("")
 def list_center_users(db: Session = Depends(get_db), current_user: UserDB = Depends(get_current_user)):
     try:
-        from app.soft_delete import active_filter, is_deleted, user_may_login
+        from app.soft_delete import active_filter, is_deleted
     except ImportError:
-        from app.soft_delete import active_filter, is_deleted, user_may_login
+        from app.soft_delete import active_filter, is_deleted
     manageable = _manageable(db, current_user)
     users = active_filter(db.query(UserDB).filter(UserDB.role == "CENTER"), UserDB).order_by(UserDB.name.asc()).all()
     out = []
     for u in users:
-        if is_deleted(u) or not user_may_login(db, u):
+        if is_deleted(u):
             continue
         links = _links_of(db, u)
         if manageable is not None and not any(l["centerId"] in manageable for l in links):
@@ -182,11 +183,8 @@ def list_center_users(db: Session = Depends(get_db), current_user: UserDB = Depe
             "currentUserId": current_user.id}
 
 
-@router.post("")
-def create_center_user(body: CenterUserCreate, db: Session = Depends(get_db),
-                       current_user: UserDB = Depends(get_current_user)):
-    """Create a centre login, or link an existing centre login (same email) to your centres."""
-    manageable = _manageable(db, current_user)
+def create_center_user_core(body: CenterUserCreate, db: Session, actor: UserDB,
+                            manageable: Optional[List[str]]) -> dict:
     email = (body.email or "").strip()
     if not _EMAIL_RE.match(email):
         raise HTTPException(status_code=400, detail="Enter a valid email address")
@@ -195,8 +193,14 @@ def create_center_user(body: CenterUserCreate, db: Session = Depends(get_db),
         raise HTTPException(status_code=400, detail="Pick at least one centre")
     existing = db.query(UserDB).filter(UserDB.email.ilike(email)).first()
     if existing is not None:
+        try:
+            from app.soft_delete import is_deleted, clear_deleted
+        except ImportError:
+            from app.soft_delete import is_deleted, clear_deleted
         if existing.role != "CENTER":
             raise HTTPException(status_code=409, detail="This email already belongs to a non-centre account")
+        if is_deleted(existing):
+            clear_deleted(existing)
         _materialize_fallback(db, existing)
         already = {r.center_id for r in db.query(UserCenterAccessDB).filter(UserCenterAccessDB.user_id == existing.id).all()}
         added = 0
@@ -204,9 +208,9 @@ def create_center_user(body: CenterUserCreate, db: Session = Depends(get_db),
             if l.centerId in already:
                 continue
             db.add(UserCenterAccessDB(user_id=existing.id, center_id=l.centerId, is_admin=l.isAdmin,
-                                      permissions=l.permissions, created_at=_now(), created_by=current_user.email))
+                                      permissions=l.permissions, created_at=_now(), created_by=actor.email))
             added += 1
-        if not added:
+        if not added and not is_deleted(existing):
             raise HTTPException(status_code=409, detail="This login is already linked to the selected centre(s)")
         db.flush()
         access_svc.reassign_primary_center(db, existing)
@@ -219,24 +223,61 @@ def create_center_user(body: CenterUserCreate, db: Session = Depends(get_db),
     if not body.password:
         raise HTTPException(status_code=400, detail="Password is required for a new login")
     _validate_password(body.password)
+    try:
+        from app.security import looks_like_bcrypt
+    except ImportError:
+        from app.security import looks_like_bcrypt
+    pw = body.password if looks_like_bcrypt(body.password) else hash_password(body.password)
     u = UserDB(email=email, name=name, role="CENTER",
-               metadata_={"password": hash_password(body.password), "centerId": links[0].centerId})
+               metadata_={"password": pw, "centerId": links[0].centerId})
     db.add(u)
     db.flush()
     for l in links:
         db.add(UserCenterAccessDB(user_id=u.id, center_id=l.centerId, is_admin=l.isAdmin,
-                                  permissions=l.permissions, created_at=_now(), created_by=current_user.email))
+                                  permissions=l.permissions, created_at=_now(), created_by=actor.email))
     db.commit()
     db.refresh(u)
     return {"linkedExisting": False, "user": _user_out(db, u, manageable)}
 
 
-@router.put("/{user_id}")
-def update_center_user(user_id: int, body: CenterUserUpdate, db: Session = Depends(get_db),
-                       current_user: UserDB = Depends(get_current_user)):
-    """Replace this login's links for the centres you manage (others are left alone);
-    optionally rename / reset the password."""
+@router.post("")
+async def create_center_user(body: CenterUserCreate, db: Session = Depends(get_db),
+                             current_user: UserDB = Depends(get_current_user)):
+    """Create a centre login, or link an existing centre login (same email) to your centres.
+    Non–Super Admin changes wait for Super Admin approval (HTTP 202)."""
     manageable = _manageable(db, current_user)
+    if current_user.role != "SUPER_ADMIN":
+        try:
+            from app.routers.approvals import create_pending_approval, announce_pending_approval, pending_response
+            from app.security import looks_like_bcrypt
+        except ImportError:
+            from app.routers.approvals import create_pending_approval, announce_pending_approval, pending_response
+            from app.security import looks_like_bcrypt
+        payload = body.model_dump() if hasattr(body, "model_dump") else body.dict()
+        if payload.get("password") and not looks_like_bcrypt(payload["password"]):
+            payload["password"] = hash_password(payload["password"])
+        appr = create_pending_approval(
+            db, current_user, action_type="CREATE_CENTER_USER", entity_type="center_user",
+            entity_id=None, payload=payload,
+        )
+        data = await announce_pending_approval(db, appr, current_user)
+        return pending_response(data, "New centre user sent to the Super Admin for approval.")
+    try:
+        from app.entity_lifecycle import write_audit, snapshot_center_user_row
+    except ImportError:
+        from app.entity_lifecycle import write_audit, snapshot_center_user_row
+    result = create_center_user_core(body, db, current_user, manageable)
+    uid = result["user"]["id"]
+    u = db.query(UserDB).filter(UserDB.id == uid).first()
+    write_audit(
+        db, actor=current_user, entity_type="center_user", entity_id=str(uid),
+        action="CREATE", before=None, after=snapshot_center_user_row(u), commit=True,
+    )
+    return result
+
+
+def update_center_user_core(user_id: int, body: CenterUserUpdate, db: Session, actor: UserDB,
+                            manageable: Optional[List[str]]) -> dict:
     u = db.query(UserDB).filter(UserDB.id == user_id, UserDB.role == "CENTER").first()
     if not u:
         raise HTTPException(status_code=404, detail="Centre user not found")
@@ -268,14 +309,14 @@ def update_center_user(user_id: int, body: CenterUserUpdate, db: Session = Depen
         r = by_center.get(cid)
         if r is None:
             db.add(UserCenterAccessDB(user_id=u.id, center_id=cid, is_admin=l.isAdmin,
-                                      permissions=l.permissions, created_at=_now(), created_by=current_user.email))
+                                      permissions=l.permissions, created_at=_now(), created_by=actor.email))
         else:
             r.is_admin = l.isAdmin
             r.permissions = l.permissions
             flag_modified(r, "permissions")
         touched.add(cid)
     db.flush()
-    if current_user.role != "SUPER_ADMIN":
+    if actor.role != "SUPER_ADMIN":
         for cid in touched:
             if _admin_count(db, cid) < 1:
                 db.rollback()
@@ -283,8 +324,12 @@ def update_center_user(user_id: int, body: CenterUserUpdate, db: Session = Depen
     if (body.name or "").strip():
         u.name = " ".join(body.name.split())
     if body.password:
+        try:
+            from app.security import looks_like_bcrypt
+        except ImportError:
+            from app.security import looks_like_bcrypt
         meta = dict(u.metadata_ or {})
-        meta["password"] = hash_password(body.password)
+        meta["password"] = body.password if looks_like_bcrypt(body.password) else hash_password(body.password)
         u.metadata_ = meta
         flag_modified(u, "metadata_")
     access_svc.reassign_primary_center(db, u)
@@ -293,16 +338,174 @@ def update_center_user(user_id: int, body: CenterUserUpdate, db: Session = Depen
     return {"user": _user_out(db, u, manageable)}
 
 
+@router.put("/{user_id}")
+async def update_center_user(user_id: int, body: CenterUserUpdate, db: Session = Depends(get_db),
+                             current_user: UserDB = Depends(get_current_user)):
+    """Replace this login's links for the centres you manage (others are left alone);
+    optionally rename / reset the password. Non–SA waits for approval."""
+    manageable = _manageable(db, current_user)
+    u = db.query(UserDB).filter(UserDB.id == user_id, UserDB.role == "CENTER").first()
+    if not u:
+        raise HTTPException(status_code=404, detail="Centre user not found")
+    if current_user.role != "SUPER_ADMIN":
+        try:
+            from app.routers.approvals import create_pending_approval, announce_pending_approval, pending_response
+            from app.security import looks_like_bcrypt
+        except ImportError:
+            from app.routers.approvals import create_pending_approval, announce_pending_approval, pending_response
+            from app.security import looks_like_bcrypt
+        payload = body.model_dump() if hasattr(body, "model_dump") else body.dict()
+        payload["id"] = user_id
+        if payload.get("password") and not looks_like_bcrypt(payload["password"]):
+            payload["password"] = hash_password(payload["password"])
+        appr = create_pending_approval(
+            db, current_user, action_type="UPDATE_CENTER_USER", entity_type="center_user",
+            entity_id=str(user_id), payload=payload,
+        )
+        data = await announce_pending_approval(db, appr, current_user)
+        return pending_response(data, "Centre user edit sent to the Super Admin for approval.")
+    try:
+        from app.entity_lifecycle import write_audit, snapshot_center_user_row
+    except ImportError:
+        from app.entity_lifecycle import write_audit, snapshot_center_user_row
+    before = snapshot_center_user_row(u)
+    result = update_center_user_core(user_id, body, db, current_user, manageable)
+    after_u = db.query(UserDB).filter(UserDB.id == user_id).first()
+    write_audit(
+        db, actor=current_user, entity_type="center_user", entity_id=str(user_id),
+        action="UPDATE", before=before, after=snapshot_center_user_row(after_u), commit=True,
+    )
+    return result
+
+
+class FreezeBody(BaseModel):
+    frozen: bool
+
+
+@router.put("/{user_id}/freeze")
+async def freeze_center_user(user_id: int, body: FreezeBody, db: Session = Depends(get_db),
+                             current_user: UserDB = Depends(get_current_user)):
+    manageable = _manageable(db, current_user)
+    try:
+        from app.soft_delete import is_deleted
+        from app.entity_lifecycle import set_center_user_frozen
+    except ImportError:
+        from app.soft_delete import is_deleted
+        from app.entity_lifecycle import set_center_user_frozen
+    u = db.query(UserDB).filter(UserDB.id == user_id, UserDB.role == "CENTER").first()
+    if not u or is_deleted(u):
+        raise HTTPException(status_code=404, detail="Centre user not found")
+    links = _links_of(db, u)
+    if manageable is not None and not any(l["centerId"] in manageable for l in links):
+        raise HTTPException(status_code=404, detail="Centre user not found")
+    if current_user.role != "SUPER_ADMIN":
+        try:
+            from app.routers.approvals import create_pending_approval, announce_pending_approval, pending_response
+        except ImportError:
+            from app.routers.approvals import create_pending_approval, announce_pending_approval, pending_response
+        action = "FREEZE_CENTER_USER" if body.frozen else "UNFREEZE_CENTER_USER"
+        appr = create_pending_approval(
+            db, current_user, action_type=action, entity_type="center_user",
+            entity_id=str(user_id), payload={"id": user_id, "frozen": bool(body.frozen)},
+        )
+        data = await announce_pending_approval(db, appr, current_user)
+        return pending_response(
+            data,
+            ("Freeze" if body.frozen else "Unfreeze") + " request sent to the Super Admin for approval.",
+        )
+    try:
+        set_center_user_frozen(db, user_id, bool(body.frozen), actor=current_user)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Centre user not found")
+    u = db.query(UserDB).filter(UserDB.id == user_id).first()
+    return {"user": _user_out(db, u, manageable)}
+
+
+def soft_delete_center_user_core(db: Session, user_id: int) -> None:
+    try:
+        from app.soft_delete import soft_delete_user, is_deleted
+    except ImportError:
+        from app.soft_delete import soft_delete_user, is_deleted
+    u = db.query(UserDB).filter(UserDB.id == user_id, UserDB.role == "CENTER").first()
+    if not u or is_deleted(u):
+        raise LookupError("Centre user not found")
+    soft_delete_user(db, u)
+    db.commit()
+
+
+@router.delete("/{user_id}")
+async def delete_center_user(user_id: int, db: Session = Depends(get_db),
+                             current_user: UserDB = Depends(get_current_user)):
+    """Soft-delete a centre login. Non–SA waits for approval."""
+    manageable = _manageable(db, current_user)
+    try:
+        from app.soft_delete import is_deleted
+        from app.entity_lifecycle import write_audit, snapshot_center_user_row
+    except ImportError:
+        from app.soft_delete import is_deleted
+        from app.entity_lifecycle import write_audit, snapshot_center_user_row
+    u = db.query(UserDB).filter(UserDB.id == user_id, UserDB.role == "CENTER").first()
+    if not u or is_deleted(u):
+        raise HTTPException(status_code=404, detail="Centre user not found")
+    links = _links_of(db, u)
+    if manageable is not None and not any(l["centerId"] in manageable for l in links):
+        raise HTTPException(status_code=404, detail="Centre user not found")
+    if current_user.role != "SUPER_ADMIN":
+        try:
+            from app.routers.approvals import create_pending_approval, announce_pending_approval, pending_response
+        except ImportError:
+            from app.routers.approvals import create_pending_approval, announce_pending_approval, pending_response
+        appr = create_pending_approval(
+            db, current_user, action_type="DELETE_CENTER_USER", entity_type="center_user",
+            entity_id=str(user_id), payload=snapshot_center_user_row(u) or {"id": user_id},
+        )
+        data = await announce_pending_approval(db, appr, current_user)
+        return pending_response(data, "Delete request sent to the Super Admin for approval.")
+    before = snapshot_center_user_row(u)
+    soft_delete_center_user_core(db, user_id)
+    write_audit(
+        db, actor=current_user, entity_type="center_user", entity_id=str(user_id),
+        action="DELETE", before=before, after=None, commit=True,
+    )
+    return {"ok": True}
+
+
 @router.delete("/{user_id}/centers/{center_id}")
-def unlink_center_user(user_id: int, center_id: str, db: Session = Depends(get_db),
-                       current_user: UserDB = Depends(get_current_user)):
-    """Remove one login's access to one centre (the login itself is not deleted)."""
+async def unlink_center_user(user_id: int, center_id: str, db: Session = Depends(get_db),
+                             current_user: UserDB = Depends(get_current_user)):
+    """Remove one login's access to one centre. If no centres remain, soft-delete the login.
+    Non–SA waits for approval."""
     manageable = _manageable(db, current_user)
     if manageable is not None and center_id not in manageable:
         raise HTTPException(status_code=403, detail="You can only manage centres you administer")
     u = db.query(UserDB).filter(UserDB.id == user_id, UserDB.role == "CENTER").first()
     if not u:
         raise HTTPException(status_code=404, detail="Centre user not found")
+    if current_user.role != "SUPER_ADMIN":
+        try:
+            from app.routers.approvals import create_pending_approval, announce_pending_approval, pending_response
+        except ImportError:
+            from app.routers.approvals import create_pending_approval, announce_pending_approval, pending_response
+        appr = create_pending_approval(
+            db, current_user, action_type="UNLINK_CENTER_USER", entity_type="center_user",
+            entity_id=str(user_id), payload={"id": user_id, "centerId": center_id},
+        )
+        data = await announce_pending_approval(db, appr, current_user)
+        return pending_response(data, "Unlink request sent to the Super Admin for approval.")
+    return unlink_center_user_core(db, user_id, center_id, actor=current_user)
+
+
+def unlink_center_user_core(db: Session, user_id: int, center_id: str, actor: Optional[UserDB] = None) -> dict:
+    try:
+        from app.soft_delete import soft_delete_user, is_deleted
+        from app.entity_lifecycle import write_audit, snapshot_center_user_row
+    except ImportError:
+        from app.soft_delete import soft_delete_user, is_deleted
+        from app.entity_lifecycle import write_audit, snapshot_center_user_row
+    u = db.query(UserDB).filter(UserDB.id == user_id, UserDB.role == "CENTER").first()
+    if not u or is_deleted(u):
+        raise HTTPException(status_code=404, detail="Centre user not found")
+    before = snapshot_center_user_row(u)
     _materialize_fallback(db, u)
     row = db.query(UserCenterAccessDB).filter(
         UserCenterAccessDB.user_id == u.id, UserCenterAccessDB.center_id == center_id).first()
@@ -310,9 +513,24 @@ def unlink_center_user(user_id: int, center_id: str, db: Session = Depends(get_d
         raise HTTPException(status_code=404, detail="This login is not linked to that centre")
     db.delete(row)
     db.flush()
-    if current_user.role != "SUPER_ADMIN" and _admin_count(db, center_id) < 1:
-        db.rollback()
-        raise HTTPException(status_code=400, detail="A centre must keep at least one Center Admin")
-    access_svc.reassign_primary_center(db, u)
+    if actor is None or actor.role != "SUPER_ADMIN":
+        if _admin_count(db, center_id) < 1:
+            db.rollback()
+            raise HTTPException(status_code=400, detail="A centre must keep at least one Center Admin")
+    remaining = db.query(UserCenterAccessDB).filter(UserCenterAccessDB.user_id == u.id).count()
+    if remaining == 0 and not (u.metadata_ or {}).get("centerId"):
+        soft_delete_user(db, u)
+    elif remaining == 0:
+        # No access rows left — soft-delete login (keep audit trail)
+        soft_delete_user(db, u)
+    else:
+        access_svc.reassign_primary_center(db, u)
     db.commit()
+    write_audit(
+        db, actor=actor, entity_type="center_user", entity_id=str(user_id),
+        action="UPDATE", before=before, after=snapshot_center_user_row(
+            db.query(UserDB).filter(UserDB.id == user_id).first()
+        ),
+        note=f"Unlinked centre {center_id}", commit=True,
+    )
     return {"ok": True}

@@ -44,6 +44,7 @@ def db_to_schema(c: CenterDB) -> dict:
         "letterheadMode": meta.get("letterheadMode", "full-page"),
         "logoUrl": file_storage.public_url(meta.get("logoUrl")),
         "createdAt": c.created_at,
+        "frozenAt": getattr(c, "frozen_at", None),
     }
 
 @router.get("", response_model=list[CenterResponse])
@@ -202,7 +203,25 @@ async def save_center(
         )
         data = await announce_pending_approval(db, appr, _current_user)
         return pending_response(data, ("Edit" if exists else "New centre") + " sent to the Super Admin for approval.")
-    return save_center_core(center_in, db)
+    try:
+        from app.entity_lifecycle import write_audit, snapshot_center_row
+        from app.soft_delete import is_deleted
+    except ImportError:
+        from app.entity_lifecycle import write_audit, snapshot_center_row
+        from app.soft_delete import is_deleted
+    before = None
+    if center_in.id:
+        prev = db.query(CenterDB).filter(CenterDB.id == center_in.id).first()
+        if prev and not is_deleted(prev):
+            before = snapshot_center_row(prev)
+    saved = save_center_core(center_in, db)
+    write_audit(
+        db, actor=_current_user, entity_type="center", entity_id=saved["id"],
+        action="UPDATE" if before else "CREATE", before=before,
+        after=snapshot_center_row(db.query(CenterDB).filter(CenterDB.id == saved["id"]).first()),
+        commit=True,
+    )
+    return saved
 
 
 def save_center_core(center_in: CenterCreate, db: Session) -> dict:
@@ -284,6 +303,54 @@ def save_center_core(center_in: CenterCreate, db: Session) -> dict:
 
     return db_to_schema(saved_c)
 
+class FreezeBody(BaseModel):
+    frozen: bool
+
+
+@router.put("/{center_id}/freeze", response_model=CenterResponse)
+async def freeze_center(
+    center_id: str,
+    body: FreezeBody,
+    db: Session = Depends(get_db),
+    _current_user: UserDB = Depends(require_roles("SUPER_ADMIN", "MANAGER")),
+):
+    """Freeze/unfreeze a centre. Manager stages for Super Admin approval (202)."""
+    try:
+        from app.soft_delete import is_deleted
+        from app.entity_lifecycle import set_center_frozen
+    except ImportError:
+        from app.soft_delete import is_deleted
+        from app.entity_lifecycle import set_center_frozen
+    center = db.query(CenterDB).filter(CenterDB.id == center_id).first()
+    if not center or is_deleted(center):
+        raise HTTPException(status_code=404, detail="Center not found")
+    if _current_user.role == "MANAGER":
+        try:
+            from app.routers.approvals import (
+                create_pending_approval, announce_pending_approval, pending_response,
+            )
+        except ImportError:
+            from app.routers.approvals import (
+                create_pending_approval, announce_pending_approval, pending_response,
+            )
+        action = "FREEZE_CENTER" if body.frozen else "UNFREEZE_CENTER"
+        appr = create_pending_approval(
+            db, _current_user, action_type=action, entity_type="center",
+            entity_id=center_id, payload={"id": center_id, "frozen": bool(body.frozen)},
+        )
+        data = await announce_pending_approval(db, appr, _current_user)
+        return pending_response(
+            data,
+            ("Freeze" if body.frozen else "Unfreeze") + " request sent to the Super Admin for approval.",
+        )
+    try:
+        set_center_frozen(db, center_id, bool(body.frozen), actor=_current_user)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Center not found")
+    center = db.query(CenterDB).filter(CenterDB.id == center_id).first()
+    return db_to_schema(center)
+
+
 @router.delete("/{center_id}", status_code=204)
 async def delete_center(
     center_id: str,
@@ -293,8 +360,10 @@ async def delete_center(
     """Only Super Admin and Manager may delete. A Manager's delete waits for Super Admin approval (202)."""
     try:
         from app.soft_delete import is_deleted
+        from app.entity_lifecycle import write_audit, snapshot_center_row
     except ImportError:
         from app.soft_delete import is_deleted
+        from app.entity_lifecycle import write_audit, snapshot_center_row
     center = db.query(CenterDB).filter(CenterDB.id == center_id).first()
     if not center or is_deleted(center):
         raise HTTPException(status_code=404, detail="Center not found")
@@ -313,14 +382,19 @@ async def delete_center(
         )
         data = await announce_pending_approval(db, appr, _current_user)
         return pending_response(data, "Delete request sent to the Super Admin for approval.")
+    before = snapshot_center_row(center)
     delete_center_core(db, center_id)
+    write_audit(
+        db, actor=_current_user, entity_type="center", entity_id=center_id,
+        action="DELETE", before=before, after=None, commit=True,
+    )
     return None
 
 
 def delete_center_core(db: Session, center_id: str) -> None:
-    """Soft-delete the centre. Pricing/access links cleared; orphaned centre logins
+    """Soft-delete the centre. Access links cleared; orphaned centre logins
     (no remaining live centre) are soft-deleted so they cannot sign in or appear
-    under Center Users. Cases and invoices stay for history."""
+    under Center Users. Pricing rows kept. Cases and invoices stay for history."""
     try:
         from app.soft_delete import soft_delete_center_and_orphaned_logins
     except ImportError:
