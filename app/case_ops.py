@@ -1,6 +1,7 @@
 """Case-level operations shared by the reports router and the approvals flow:
 proper delete (every dependent row) and the patient-details edit."""
 import logging
+from app.names import clean_dr
 import re
 import secrets
 import uuid
@@ -120,7 +121,7 @@ def case_details_snapshot(case: CaseDB) -> dict:
         "ageUnit": meta.get("ageUnit") or "Years",
         "gender": case.gender,
         "phone": case.phone,
-        "referringPhysicianName": case.referring_physician_name,
+        "referringPhysicianName": clean_dr(case.referring_physician_name),
         "clinicalNotes": meta.get("clinicalNotes"),
         "isUrgent": bool(case.is_urgent) if case.is_urgent is not None else bool(meta.get("isUrgent")),
         "isPortable": bool(meta.get("isPortable")),

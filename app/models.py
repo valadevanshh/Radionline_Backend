@@ -337,3 +337,67 @@ class ImageAnnotationDB(Base):
     author_name = Column(String(255), nullable=True)
     author_role = Column(String(50), nullable=True)
     created_at = Column(String(50), nullable=False)
+
+
+class PayeeAccountDB(Base):
+    """Bank / UPI details of people Radionline pays (referring doctors, radiologists, others).
+    Super Admin only. Created on first use (additive table, no migration)."""
+    __tablename__ = "payee_accounts"
+    __table_args__ = {'extend_existing': True}
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    payee_name = Column(String(255), nullable=False)
+    payee_type = Column(String(30), nullable=False, default="OTHER")  # REFERRER | DOCTOR | OTHER
+    center_id = Column(String(100), nullable=True, index=True)       # referring doctor's centre
+    doctor_id = Column(String(100), nullable=True, index=True)       # radiologist (doctors.id)
+    account_holder = Column(String(255), nullable=True)
+    bank_name = Column(String(255), nullable=True)
+    account_number = Column(String(40), nullable=True)
+    ifsc = Column(String(20), nullable=True)
+    upi_id = Column(String(100), nullable=True)
+    notes = Column(Text, nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(String(50), nullable=False)
+    updated_at = Column(String(50), nullable=True)
+
+
+class CenterWalletDB(Base):
+    """t83: prepaid wallet balance of a centre (INR whole rupees)."""
+    __tablename__ = "center_wallets"
+    __table_args__ = {'extend_existing': True}
+
+    center_id = Column(String(100), primary_key=True)
+    balance_inr = Column(Integer, nullable=False, default=0)
+    updated_at = Column(String(50), nullable=True)
+
+
+class WalletTopupDB(Base):
+    """t83: a centre's "Payment done" request, approved or rejected by the Super Admin."""
+    __tablename__ = "wallet_topups"
+    __table_args__ = {'extend_existing': True}
+
+    id = Column(String(100), primary_key=True)
+    center_id = Column(String(100), nullable=False, index=True)
+    amount_inr = Column(Integer, nullable=False)
+    reference = Column(String(120), nullable=True)
+    status = Column(String(20), nullable=False, default="PENDING", index=True)  # PENDING | APPROVED | REJECTED
+    requested_by = Column(String(255), nullable=True)
+    requested_at = Column(String(50), nullable=False)
+    decided_by = Column(String(255), nullable=True)
+    decided_at = Column(String(50), nullable=True)
+    note = Column(Text, nullable=True)
+
+
+class WalletTransactionDB(Base):
+    """t83: wallet ledger. TOPUP (+) on approval, CHARGE (-) once per completed case (ref case:<id>)."""
+    __tablename__ = "wallet_transactions"
+    __table_args__ = {'extend_existing': True}
+
+    id = Column(String(100), primary_key=True)
+    center_id = Column(String(100), nullable=False, index=True)
+    amount_inr = Column(Integer, nullable=False)
+    kind = Column(String(20), nullable=False)
+    ref = Column(String(150), nullable=False, index=True)
+    note = Column(Text, nullable=True)
+    balance_after = Column(Integer, nullable=False)
+    created_at = Column(String(50), nullable=False)

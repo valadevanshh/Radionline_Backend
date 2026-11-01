@@ -93,6 +93,8 @@ class CenterResponse(CenterBase):
 # XRay Report Schemas
 class ReportBase(BaseModel):
     patientNumber: str
+    # The centre's own patient ID (optional); stored in metadata.centerPatientId
+    centerPatientId: Optional[str] = None
     fullName: str
     age: int
     ageUnit: Optional[str] = "Years"
@@ -142,6 +144,8 @@ class StudyUpload(BaseModel):
     images: List[str] = []
     # This study's own date (DD-MM-YYYY or YYYY-MM-DD); stored in studies.metadata.studyDate
     studyDate: Optional[str] = None
+    # HH:MM (24h) when the image was scanned; stored in studies.metadata.studyTime
+    studyTime: Optional[str] = None
 
 class ReportCreate(ReportBase):
     id: Optional[str] = None

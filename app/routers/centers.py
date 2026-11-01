@@ -119,6 +119,62 @@ def update_center_profile(
     return db_to_schema(c)
 
 
+class ReferrerIn(BaseModel):
+    name: str
+    # Referral cut for this referring doctor (optional)
+    hasCut: bool = False
+    cutType: Optional[str] = None  # "percent" | "fixed"
+    cutValue: Optional[float] = None
+
+
+def _referrers(c: CenterDB) -> list:
+    return list((c.metadata_ or {}).get("referringDoctors") or [])
+
+
+@router.get("/{center_id}/referrers")
+def list_referrers(center_id: str, db: Session = Depends(get_db), current_user: UserDB = Depends(get_current_user)):
+    """Referring doctors saved for a centre (stored in centers.metadata.referringDoctors)."""
+    if current_user.role not in ("SUPER_ADMIN", "MANAGER", "CENTER"):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    if current_user.role == "CENTER":
+        access_svc.require_center_perm(db, current_user, center_id, "reports", "read")
+    c = db.query(CenterDB).filter(CenterDB.id == center_id).first()
+    if not c:
+        raise HTTPException(status_code=404, detail="Center not found")
+    return _referrers(c)
+
+
+@router.post("/{center_id}/referrers")
+def add_referrer(center_id: str, body: ReferrerIn, db: Session = Depends(get_db), current_user: UserDB = Depends(get_current_user)):
+    """Add (or update by name) a centre's referring doctor, with an optional referral cut."""
+    if current_user.role not in ("SUPER_ADMIN", "MANAGER", "CENTER"):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    if current_user.role == "CENTER":
+        access_svc.require_center_perm(db, current_user, center_id, "reports", "write")
+    c = db.query(CenterDB).filter(CenterDB.id == center_id).first()
+    if not c:
+        raise HTTPException(status_code=404, detail="Center not found")
+    name = " ".join((body.name or "").split()).upper()[:120]
+    if not name:
+        raise HTTPException(status_code=400, detail="Referring doctor name is required")
+    entry = {"name": name, "hasCut": bool(body.hasCut), "cutType": None, "cutValue": None}
+    if body.hasCut:
+        if body.cutType not in ("percent", "fixed"):
+            raise HTTPException(status_code=400, detail="Choose % or fixed amount for the referral cut")
+        v = float(body.cutValue or 0)
+        if v < 0 or (body.cutType == "percent" and v > 100):
+            raise HTTPException(status_code=400, detail="Invalid referral cut")
+        entry.update(cutType=body.cutType, cutValue=round(v, 2))
+    items = [r for r in _referrers(c) if (r.get("name") or "").upper() != name]
+    items.append(entry)
+    meta = dict(c.metadata_ or {})
+    meta["referringDoctors"] = items
+    c.metadata_ = meta
+    flag_modified(c, "metadata_")
+    db.commit()
+    return entry
+
+
 @router.post("", response_model=CenterResponse)
 async def save_center(
     center_in: CenterCreate,

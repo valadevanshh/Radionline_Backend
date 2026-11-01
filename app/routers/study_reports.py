@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from typing import Optional, List
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from app.names import clean_dr, strip_dr
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -339,6 +340,9 @@ def enrich_case_item(item: dict, case: CaseDB, studies: list) -> dict:
             "modality": s.modality,
             # The study's own date; falls back to the case date for older studies
             "studyDate": (s.metadata_ or {}).get("studyDate") or case.study_date,
+            # When the image was scanned (optional) and when it reached the system (server time)
+            "studyTime": (s.metadata_ or {}).get("studyTime"),
+            "uploadedAt": getattr(s, "created_at", None),
             "reportStatus": study_report_status(s),
             "images": file_storage.public_url_list(images_by_study.get(s.id, [])),
             "status": s.status,
@@ -349,7 +353,7 @@ def enrich_case_item(item: dict, case: CaseDB, studies: list) -> dict:
             "signedAt": getattr(s, "signed_at", None),
             "reportDate": study_report_date(s),
             "signedBy": getattr(s, "signed_by", None),
-            "signedByName": getattr(s, "signed_by_name", None),
+            "signedByName": clean_dr(getattr(s, "signed_by_name", None)),
             "claimedBy": s.claimed_by,
             "claimedByName": s.claimed_by_name,
             "isUrgent": bool(s.is_urgent) if s.is_urgent is not None else bool(case.is_urgent),
@@ -549,6 +553,11 @@ async def finalize_case_if_complete(db: Session, case: CaseDB, studies: list) ->
         try:
             with db.begin_nested():
                 out["billing"] = billing_svc.create_billing_on_sign_off(db, case_id=case.id)
+                # t83: prepaid centre - debit the wallet by the centre charge just billed
+                _b = out["billing"] or {}
+                if _b.get("centerTotalAdded"):
+                    from app.routers.wallet import debit_for_case
+                    out["wallet"] = debit_for_case(db, case.id, case.radiology_center_id, int(_b["centerTotalAdded"]))
         except ValueError as be:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(be))
         except Exception as be:
@@ -679,6 +688,12 @@ async def sign_study_report(
     case, study = resolve_case_and_study(db, case_id, study_id)
     doctor_may_edit_study(db, current_user, study)
     already_signed = study_report_status(study) == "SIGNED"
+    # t81: once the case is Completed a doctor cannot change (re-sign) a signed report; Super Admin can.
+    if already_signed and current_user.role == "DOCTOR" and (case.status or "") == "Completed":
+        raise HTTPException(
+            status_code=403,
+            detail="This report is completed and can no longer be edited (only Super Admin can).",
+        )
     apply_study_payload(study, payload)
     if not (study.findings and str(study.findings).strip()) and not (
         study.impression and str(study.impression).strip()

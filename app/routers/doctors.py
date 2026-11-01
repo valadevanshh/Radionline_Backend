@@ -5,6 +5,7 @@ import uuid
 from datetime import datetime
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
+from app.names import clean_dr, strip_dr
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 try:
@@ -33,9 +34,9 @@ def db_to_schema(d: DoctorDB) -> dict:
     meta = d.metadata_ or {}
     return {
         "id": d.id,
-        "firstName": d.first_name,
+        "firstName": strip_dr(d.first_name),
         "lastName": d.last_name,
-        "fullName": d.full_name,
+        "fullName": clean_dr(d.full_name),
         "email": d.email,
         "username": d.username,
         "password": None,
@@ -98,6 +99,10 @@ async def save_doctor(
 
 
 def save_doctor_core(doc_in: DoctorCreate, db: Session) -> dict:
+    # t86: the name is stored without a typed "Dr" (the title is added once)
+    doc_in.firstName = strip_dr(doc_in.firstName) or doc_in.firstName
+    if doc_in.fullName:
+        doc_in.fullName = clean_dr(doc_in.fullName)
     doc_id = doc_in.id or f"doc-{int(time.time() * 1000)}"
     existing = db.query(DoctorDB).filter(DoctorDB.id == doc_id).first()
 

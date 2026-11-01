@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Optional, List, Tuple
 from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException, status, Query
+from app.names import clean_dr, strip_dr
 from sqlalchemy import update, and_
 from sqlalchemy.orm import Session
 try:
@@ -101,18 +102,19 @@ def db_to_schema(r: ReportDB) -> dict:
         "bodyParts": meta.get("bodyParts", []),
         "modality": meta.get("modality", pricing.DEFAULT_STUDY_MODALITY),
         "referringPhysicianId": r.referring_physician_id,
-        "referringPhysicianName": r.referring_physician_name,
+        "referringPhysicianName": clean_dr(r.referring_physician_name),
         "assignedDoctorId": r.assigned_doctor_id,
-        "assignedDoctorName": r.assigned_doctor_name,
+        "assignedDoctorName": clean_dr(r.assigned_doctor_name),
         "assignedDoctorDegree": meta.get("assignedDoctorDegree", "M.D. (Radiodiagnosis)"),
         "assignedDoctorRegNo": meta.get("assignedDoctorRegNo") or None,  # no made-up default
         "assignedDoctorIds": meta.get("assignedDoctorIds", ["ALL"]),
         "claimedByDoctorId": meta.get("claimedByDoctorId"),
-        "claimedByDoctorName": meta.get("claimedByDoctorName"),
+        "claimedByDoctorName": clean_dr(meta.get("claimedByDoctorName")),
         "claimStatus": meta.get("claimStatus", "UNCLAIMED"),
         "status": r.status,
         "isUrgent": bool(r.is_urgent) if r.is_urgent is not None else meta.get("isUrgent", False),
         "isPortable": meta.get("isPortable", False),
+        "centerPatientId": meta.get("centerPatientId"),
         "studyDate": r.study_date,
         "clinicalNotes": meta.get("clinicalNotes"),
         "findings": meta.get("findings"),
@@ -158,18 +160,19 @@ def study_to_schema(study: StudyDB, case: Optional[CaseDB] = None) -> dict:
         "bodyParts": [study.body_part] if study else [],
         "modality": (study.modality if study else None) or meta.get("modality", pricing.DEFAULT_STUDY_MODALITY),
         "referringPhysicianId": case.referring_physician_id if case else "ref-1",
-        "referringPhysicianName": case.referring_physician_name if case else "DR. REFERRING",
+        "referringPhysicianName": clean_dr(case.referring_physician_name) if case else "DR. REFERRING",
         "assignedDoctorId": study.claimed_by if study else None,
-        "assignedDoctorName": study.claimed_by_name if study else None,
+        "assignedDoctorName": clean_dr(study.claimed_by_name) if study else None,
         "assignedDoctorDegree": meta.get("assignedDoctorDegree", "M.D. (Radiodiagnosis)"),
         "assignedDoctorRegNo": meta.get("assignedDoctorRegNo") or None,  # no made-up default
         "assignedDoctorIds": meta.get("assignedDoctorIds", ["ALL"]),
         "claimedByDoctorId": study.claimed_by if study else None,
-        "claimedByDoctorName": study.claimed_by_name if study else None,
+        "claimedByDoctorName": clean_dr(study.claimed_by_name) if study else None,
         "claimStatus": "CLAIMED" if (study and study.status == "CLAIMED") else "UNCLAIMED",
         "status": study.status if study else "In Review",
         "isUrgent": is_urg,
         "isPortable": meta.get("isPortable", False),
+        "centerPatientId": meta.get("centerPatientId") or ((case.metadata_ or {}).get("centerPatientId") if case else None),
         "studyDate": case.study_date if case else "14/09/2026",
         "clinicalNotes": study.clinical_notes if study else None,
         "findings": study.findings if study else None,
@@ -284,7 +287,7 @@ def _case_work_item(db: Session, case: CaseDB, studies: list) -> dict:
             "bodyParts": [],
             "modality": pricing.DEFAULT_STUDY_MODALITY,
             "referringPhysicianId": case.referring_physician_id,
-            "referringPhysicianName": case.referring_physician_name,
+            "referringPhysicianName": clean_dr(case.referring_physician_name),
             "assignedDoctorId": None,
             "assignedDoctorName": None,
             "claimedByDoctorId": None,
@@ -566,6 +569,18 @@ def get_report(
         item = enrich_case_item(item, c, studies)
     return item
 
+COMPLETED_LOCK_DETAIL = "This report is completed. Patient and report details can no longer be edited (only Super Admin can)."
+
+
+def _is_completed_locked(case, report=None) -> bool:
+    """t81: a Completed case (or legacy report row) is read-only for centre and doctor logins."""
+    if case is not None and (case.status or "") == "Completed":
+        return True
+    if report is not None and (getattr(report, "status", None) or "") == "Completed":
+        return True
+    return False
+
+
 @router.post("", response_model=ReportResponse)
 async def save_report(
     report_in: ReportCreate,
@@ -584,6 +599,12 @@ async def save_report(
         existing_report = db.query(ReportDB).filter(ReportDB.id == report_in.id).first()
     is_new = existing_case is None and existing_report is None
     role = current_user.role
+    if is_new and role in ("CENTER", "MANAGER"):
+        # t83: prepaid centre must have at least one report charge in its wallet
+        from app.routers.wallet import assert_can_upload
+        assert_can_upload(db, report_in.radiologyCenterId)
+    if not is_new and role in ("CENTER", "DOCTOR") and _is_completed_locked(existing_case, existing_report):
+        raise HTTPException(status_code=403, detail=COMPLETED_LOCK_DETAIL)
     if role == "CENTER":
         access_svc.require_center_perm(db, current_user, report_in.radiologyCenterId, "reports", "write")
         old_center = existing_case.radiology_center_id if existing_case else (
@@ -654,6 +675,7 @@ async def save_report_core(report_in: ReportCreate, db: Session):
     raw_study_uploads = getattr(report_in, "studyUploads", None) or []
     study_image_map: List[Tuple[str, List]] = []
     study_date_map: dict = {}
+    study_time_map: dict = {}
     if raw_study_uploads:
         for su in raw_study_uploads:
             bp = (getattr(su, "bodyPart", None) or "").strip()
@@ -666,6 +688,12 @@ async def save_report_core(report_in: ReportCreate, db: Session):
                 subfolder="uploads",
             )
             study_image_map.append((bp, imgs))
+            st_raw = (getattr(su, "studyTime", None) or "").strip()
+            if st_raw:
+                import re as _re
+                if not _re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", st_raw[:5]):
+                    raise HTTPException(status_code=400, detail=f"Invalid study time for {bp}")
+                study_time_map[bp] = st_raw[:5]
             sd = (getattr(su, "studyDate", None) or "").strip()
             if sd:
                 try:
@@ -747,6 +775,9 @@ async def save_report_core(report_in: ReportCreate, db: Session):
         "isPortable": bool(report_in.isPortable) if report_in.isPortable is not None else False,
         "modality": study_modality,
     }
+    _cpid = (getattr(report_in, "centerPatientId", None) or "").strip()[:40]
+    if _cpid:
+        meta_payload["centerPatientId"] = _cpid
 
     # 1. Save or update Cases table
     case_obj = db.query(CaseDB).filter(CaseDB.id == rep_id).first()
@@ -761,7 +792,7 @@ async def save_report_core(report_in: ReportCreate, db: Session):
             radiology_center_id=report_in.radiologyCenterId,
             radiology_center_name=report_in.radiologyCenterName,
             referring_physician_id=report_in.referringPhysicianId,
-            referring_physician_name=report_in.referringPhysicianName,
+            referring_physician_name=clean_dr(report_in.referringPhysicianName),
             status=report_in.status,
             is_urgent=is_urg,
             study_date=report_in.studyDate,
@@ -782,6 +813,8 @@ async def save_report_core(report_in: ReportCreate, db: Session):
         case_obj.status = report_in.status
         case_obj.is_urgent = is_urg
         case_obj.study_date = report_in.studyDate
+        if not _cpid and (case_obj.metadata_ or {}).get("centerPatientId"):
+            meta_payload["centerPatientId"] = case_obj.metadata_["centerPatientId"]
         case_obj.metadata_ = meta_payload
 
     db.commit()
@@ -833,7 +866,11 @@ async def save_report_core(report_in: ReportCreate, db: Session):
                 claimed_by_name=report_in.claimedByDoctorName,
                 sequence_no=seq_no,
                 created_at=created_at,
-                metadata_=({**meta_payload, "studyDate": study_date_map[bp]} if study_date_map.get(bp) else meta_payload),
+                metadata_={
+                    **meta_payload,
+                    **({"studyDate": study_date_map[bp]} if study_date_map.get(bp) else {}),
+                    **({"studyTime": study_time_map[bp]} if study_time_map.get(bp) else {}),
+                },
             )
             db.add(study_obj)
             db.commit()
@@ -863,9 +900,12 @@ async def save_report_core(report_in: ReportCreate, db: Session):
         else:
             study_obj.is_urgent = is_urg
             study_obj.modality = study_modality
-            if study_date_map.get(bp):
+            if study_date_map.get(bp) or study_time_map.get(bp):
                 smeta = dict(study_obj.metadata_ or {})
-                smeta["studyDate"] = study_date_map[bp]
+                if study_date_map.get(bp):
+                    smeta["studyDate"] = study_date_map[bp]
+                if study_time_map.get(bp):
+                    smeta["studyTime"] = study_time_map[bp]
                 study_obj.metadata_ = smeta
             db.commit()
 
@@ -901,7 +941,7 @@ async def save_report_core(report_in: ReportCreate, db: Session):
             radiology_center_id=report_in.radiologyCenterId,
             radiology_center_name=report_in.radiologyCenterName,
             referring_physician_id=report_in.referringPhysicianId,
-            referring_physician_name=report_in.referringPhysicianName,
+            referring_physician_name=clean_dr(report_in.referringPhysicianName),
             assigned_doctor_id=report_in.assignedDoctorId,
             assigned_doctor_name=report_in.assignedDoctorName,
             status=report_in.status,
@@ -1206,6 +1246,8 @@ async def update_case_details(
     if not case:
         raise HTTPException(status_code=404, detail="Patient record not found")
     role = current_user.role
+    if role in ("CENTER", "DOCTOR") and _is_completed_locked(case):
+        raise HTTPException(status_code=403, detail=COMPLETED_LOCK_DETAIL)
     if role == "CENTER":
         access_svc.require_center_perm(db, current_user, case.radiology_center_id, "reports", "write")
     elif role not in ("SUPER_ADMIN", "MANAGER"):

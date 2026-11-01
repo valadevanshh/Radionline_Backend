@@ -10,6 +10,8 @@ from app.routers import public_reports
 from app.routers import notifications as notifications_router
 from app.routers import center_users, annotations
 from app.routers import admin_users
+from app.routers import payees as payees_router
+from app.routers import wallet as wallet_router
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__) # reload config
@@ -125,6 +127,8 @@ app.include_router(notifications_router.router, prefix=settings.API_PREFIX)
 app.include_router(center_users.router, prefix=settings.API_PREFIX)
 app.include_router(annotations.router, prefix=settings.API_PREFIX)
 app.include_router(admin_users.router, prefix=settings.API_PREFIX)
+app.include_router(payees_router.router, prefix=settings.API_PREFIX)
+app.include_router(wallet_router.router, prefix=settings.API_PREFIX)
 
 
 from fastapi import WebSocket, WebSocketDisconnect, Query

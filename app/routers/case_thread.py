@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from app.names import clean_dr, strip_dr
 from sqlalchemy.orm import Session
 
 try:
@@ -329,7 +330,7 @@ def _snapshot_and_unsign_study(
         "clinicalNotes": study.clinical_notes,
         "signedAt": getattr(study, "signed_at", None),
         "signedBy": getattr(study, "signed_by", None),
-        "signedByName": getattr(study, "signed_by_name", None),
+        "signedByName": clean_dr(getattr(study, "signed_by_name", None)),
         "claimedBy": study.claimed_by,
         "claimedByName": study.claimed_by_name,
     }
@@ -344,6 +345,36 @@ def _snapshot_and_unsign_study(
     return snap
 
 
+def _has_report_content(study: StudyDB) -> bool:
+    return bool(study.findings or study.impression or study.doc_content)
+
+
+def _clear_active_report(study: StudyDB) -> None:
+    """Remove the current report text so the case is Pending for the new doctor."""
+    study.findings = None
+    study.impression = None
+    study.doc_content = None
+    if hasattr(study, "technique"):
+        study.technique = None
+    study.report_status = "PENDING"
+    study.signed_at = None
+    study.signed_by = None
+    study.signed_by_name = None
+
+
+def _revert_case_to_pending(db: Session, case: CaseDB) -> None:
+    """Reassigned case goes back to Pending (no active report)."""
+    case.status = "Pending"
+    report = db.query(ReportDB).filter(ReportDB.id == case.id).first()
+    if report:
+        report.status = "Pending"
+        rmeta = dict(report.metadata_ or {})
+        rmeta["signatureApplied"] = False
+        for k in ("findings", "impression", "docContent", "reportsByBodyPart", "impressionsByBodyPart"):
+            rmeta.pop(k, None)
+        report.metadata_ = rmeta
+
+
 def _revert_case_to_active(db: Session, case: CaseDB) -> None:
     if (case.status or "") in ("Completed", "Pending", ""):
         case.status = ACTIVE_CASE_STATUS
@@ -355,6 +386,33 @@ def _revert_case_to_active(db: Session, case: CaseDB) -> None:
         if rmeta.get("signatureApplied"):
             rmeta["signatureApplied"] = False
             report.metadata_ = rmeta
+
+
+@router.get("/{report_id}/report-history")
+def get_report_history(
+    report_id: str,
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(require_roles("SUPER_ADMIN")),
+):
+    """Super Admin: every study's previous report versions plus the current one."""
+    case = _resolve_case(db, report_id)
+    out = []
+    for s in _case_studies(db, case.id):
+        meta = s.metadata_ or {}
+        out.append({
+            "studyId": s.id,
+            "bodyPart": s.body_part,
+            "current": {
+                "reportStatus": study_report_status(s),
+                "findings": s.findings,
+                "impression": s.impression,
+                "claimedByName": s.claimed_by_name,
+                "signedByName": clean_dr(getattr(s, "signed_by_name", None)),
+                "signedAt": getattr(s, "signed_at", None),
+            },
+            "history": list(meta.get("reportHistory") or []),
+        })
+    return {"caseId": case.id, "studies": out}
 
 
 @router.get("/{report_id}/comments", response_model=List[ReportCommentResponse])
@@ -504,6 +562,14 @@ async def flag_and_reassign(
                 study, event="REASSIGN", reason=reason, actor=current_user, when=when
             )
             reverted.append(study.id)
+        elif _has_report_content(study):
+            # Unsigned draft by the previous doctor: keep it in history too
+            _snapshot_and_unsign_study(
+                study, event="REASSIGN", reason=reason, actor=current_user, when=when
+            )
+        # The new doctor starts from a blank report; previous versions stay in
+        # studies.metadata.reportHistory (Super Admin can view them).
+        _clear_active_report(study)
         study.claimed_by = target.id
         study.claimed_by_name = target.full_name
         study.status = "CLAIMED"
@@ -511,7 +577,7 @@ async def flag_and_reassign(
 
     unsigned = [s for s in studies if study_report_status(s) != "SIGNED"]
     if unsigned:
-        _revert_case_to_active(db, case)
+        _revert_case_to_pending(db, case)
 
     if moved:
         report = db.query(ReportDB).filter(ReportDB.id == case.id).first()

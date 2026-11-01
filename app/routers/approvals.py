@@ -3,6 +3,7 @@ import uuid
 from datetime import datetime
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
+from app.names import clean_dr, strip_dr
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -119,7 +120,7 @@ def _snapshot_doctor(doc_id: str, db: Session) -> Optional[dict]:
         "id": d.id,
         "firstName": d.first_name,
         "lastName": d.last_name,
-        "fullName": d.full_name,
+        "fullName": clean_dr(d.full_name),
         "email": d.email,
         "username": d.username,
         "contactNumber": d.contact_number,
@@ -750,7 +751,7 @@ def _apply_doctor_action(action_type: str, entity_id: Optional[str], p: dict, db
     if doc:
         doc.first_name = p.get("firstName", doc.first_name)
         doc.last_name = p.get("lastName", doc.last_name)
-        doc.full_name = p.get("fullName", doc.full_name)
+        doc.full_name = clean_dr(p.get("fullName", doc.full_name))
         doc.email = p.get("email", doc.email)
         doc.username = p.get("username", doc.username)
         doc.contact_number = p.get("contactNumber", doc.contact_number)
@@ -761,7 +762,7 @@ def _apply_doctor_action(action_type: str, entity_id: Optional[str], p: dict, db
             id=doc_id,
             first_name=p.get("firstName", "Doctor"),
             last_name=p.get("lastName", "Name"),
-            full_name=p.get("fullName", "Dr. Doctor Name"),
+            full_name=clean_dr(p.get("fullName", "Dr. Doctor Name")),
             email=p.get("email", "doctor@example.com"),
             username=p.get("username"),
             contact_number=p.get("contactNumber", "0000000000"),

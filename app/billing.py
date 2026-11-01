@@ -132,12 +132,28 @@ def _get_or_create_open_invoice(
     return inv
 
 
+def invoice_includes_recheck(inv: Optional[InvoiceDB]) -> bool:
+    """t83: Super Admin chose to still pay the doctor for reports that were reassigned away
+    ("Add Recheck amount"): the CLAWBACK offset lines on this invoice are then not counted."""
+    return bool(inv is not None and (inv.metadata_ or {}).get("includeRecheck"))
+
+
+def counted_lines(inv: Optional[InvoiceDB], lines: List[InvoiceLineItemDB]) -> List[InvoiceLineItemDB]:
+    if not invoice_includes_recheck(inv):
+        return list(lines)
+    return [li for li in lines if line_item_status(li) != CLAWBACK]
+
+
+def recheck_lines(lines: List[InvoiceLineItemDB]) -> List[InvoiceLineItemDB]:
+    return [li for li in lines if line_item_status(li) == CLAWBACK]
+
+
 def _recompute_invoice_total(db: Session, invoice_id: str) -> None:
     inv = db.query(InvoiceDB).filter(InvoiceDB.id == invoice_id).first()
     if not inv or inv.locked:
         return
     lines = db.query(InvoiceLineItemDB).filter(InvoiceLineItemDB.invoice_id == invoice_id).all()
-    inv.total_amount = sum(int(li.amount or 0) for li in lines)
+    inv.total_amount = sum(int(li.amount or 0) for li in counted_lines(inv, lines))
     inv.updated_at = now_ist_iso()
 
 
@@ -381,7 +397,7 @@ def lock_billing_period(db: Session, period: str, locked_by: str) -> dict:
     for inv in invoices:
         # Finalize snapshot total from line items once, then lock
         lines = db.query(InvoiceLineItemDB).filter(InvoiceLineItemDB.invoice_id == inv.id).all()
-        inv.total_amount = sum(int(li.amount or 0) for li in lines)
+        inv.total_amount = sum(int(li.amount or 0) for li in counted_lines(inv, lines))
         inv.locked = True
         inv.updated_at = ts
         # Refresh overdue/pending at lock time (do not change paid)
@@ -469,6 +485,7 @@ def invoice_to_dict(inv: InvoiceDB, include_effective_status: bool = True) -> di
         "totalAmount": int(inv.total_amount or 0),
         "currency": inv.currency or "INR",
         "linkedInvoiceId": inv.linked_invoice_id,
+        "includeRecheck": invoice_includes_recheck(inv),
         "createdAt": inv.created_at,
         "updatedAt": inv.updated_at,
     }

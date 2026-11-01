@@ -37,6 +37,10 @@ class InvoiceStatusUpdate(BaseModel):
     status: str  # paid | pending
 
 
+class RecheckToggle(BaseModel):
+    include: bool
+
+
 class LockPeriodRequest(BaseModel):
     period: str  # YYYY-MM
     unlock: Optional[bool] = False
@@ -295,11 +299,41 @@ def get_invoice(
         .all()
     )
     data = billing_svc.invoice_to_dict(inv)
-    data["lineItems"] = [billing_svc.line_item_to_dict(li) for li in lines]
-    data["byDay"] = billing_svc.group_lines_by_day(lines)
+    # t83: "Add Recheck amount" - reassigned-away payouts (CLAWBACK offsets) are listed for the
+    # Super Admin; when included they are left out of the counted lines, totals and exports.
+    rc = billing_svc.recheck_lines(lines)
+    data["recheckLines"] = [billing_svc.line_item_to_dict(li) for li in rc]
+    data["recheckAmount"] = sum(-int(li.amount or 0) for li in rc)
+    shown = billing_svc.counted_lines(inv, lines)
+    data["lineItems"] = [billing_svc.line_item_to_dict(li) for li in shown]
+    data["byDay"] = billing_svc.group_lines_by_day(shown)
     if inv.party_type == "doctor":
-        data["byCenter"] = billing_svc.group_lines_by_center(lines)
+        data["byCenter"] = billing_svc.group_lines_by_center(shown)
     return data
+
+
+@router.patch("/{invoice_id}/recheck")
+def set_invoice_recheck(
+    invoice_id: str,
+    body: RecheckToggle,
+    db: Session = Depends(get_db),
+    user: UserDB = Depends(require_roles("SUPER_ADMIN")),
+):
+    """t83 (Super Admin): include / exclude the reassigned-away (recheck) payouts on a doctor invoice."""
+    inv = db.query(InvoiceDB).filter(InvoiceDB.id == invoice_id).first()
+    if not inv:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    if inv.party_type != "doctor":
+        raise HTTPException(status_code=400, detail="Recheck amount applies to doctor invoices only")
+    if inv.locked:
+        raise HTTPException(status_code=409, detail="This invoice's month is locked; unlock it to change the recheck amount")
+    meta = dict(inv.metadata_ or {})
+    meta["includeRecheck"] = bool(body.include)
+    inv.metadata_ = meta
+    db.flush()
+    billing_svc._recompute_invoice_total(db, inv.id)
+    db.commit()
+    return get_invoice(invoice_id, db, user)
 
 
 @router.patch("/{invoice_id}/status")
