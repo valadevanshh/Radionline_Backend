@@ -148,10 +148,11 @@ def match_template(
 
     templates = db.query(TemplateDB).order_by(TemplateDB.created_at.desc()).all()
     if current_user.role == "DOCTOR":
+        # Auto-match only that doctor's own templates — never shared/system defaults
         doc_keys = _doctor_claim_identity_keys(db, current_user)
         templates = [
             t for t in templates
-            if not _template_doctor_id(t) or (
+            if _template_doctor_id(t) and (
                 str(_template_doctor_id(t)).strip().lower() in doc_keys or
                 str(_template_doctor_id(t)).strip() in doc_keys
             )
