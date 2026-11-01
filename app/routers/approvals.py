@@ -700,6 +700,15 @@ def _apply_case_action(action_type: str, entity_id: Optional[str], p: dict, db: 
                 ))
 
 
+def _prepare_doctor_signature(value):
+    """Strip paper background from a new signature data URL (same as doctors router)."""
+    try:
+        from app.routers.doctors import prepare_signature_upload
+    except ImportError:
+        from app.routers.doctors import prepare_signature_upload
+    return prepare_signature_upload(value) if isinstance(value, str) else value
+
+
 def _apply_doctor_action(action_type: str, entity_id: Optional[str], p: dict, db: Session):
     doc_id = entity_id or p.get("id") or f"doc-{int(time.time() * 1000)}"
     if action_type.startswith("DELETE"):
@@ -716,7 +725,7 @@ def _apply_doctor_action(action_type: str, entity_id: Optional[str], p: dict, db
         "password": p.get("password"),
         "address": p.get("address"),
         "signatureUrl": file_storage.materialize_media_reference(
-            p.get("signatureUrl"),
+            _prepare_doctor_signature(p.get("signatureUrl")),
             category="doctors",
             entity_id=doc_id,
             subfolder="signature",

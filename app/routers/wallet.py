@@ -30,8 +30,17 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+import re
+
 from app.database import get_db, engine, Base
-from app.models import CenterDB, UserDB, CenterWalletDB, WalletTopupDB, WalletTransactionDB
+from app.models import (
+    CenterDB,
+    UserDB,
+    CenterWalletDB,
+    WalletTopupDB,
+    WalletTransactionDB,
+    PaymentCollectionAccountDB,
+)
 from app.security import get_current_user, require_roles
 from app import access as access_svc
 
@@ -39,11 +48,13 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/wallet", tags=["Wallet"])
 
+# Env fallback only when no collection account has been selected in the UI yet.
 WALLET_UPI_ID = os.getenv("WALLET_UPI_ID", "devanshvala786@okicici")
 WALLET_UPI_NAME = os.getenv("WALLET_UPI_NAME", "Radionline")
 DEFAULT_TOPUP_INR = 1000
 MAX_TOPUP_INR = 500000
 LOW_BALANCE_REPORTS = 3  # "running low" warning below this many report charges
+UPI_RE = re.compile(r"^[\w.\-]{2,}@[A-Za-z][\w.\-]{1,}$")
 
 _ensured = False
 
@@ -54,7 +65,12 @@ def ensure_wallet_tables(bind=None) -> None:
         return
     Base.metadata.create_all(
         bind=bind or engine,
-        tables=[CenterWalletDB.__table__, WalletTopupDB.__table__, WalletTransactionDB.__table__],
+        tables=[
+            CenterWalletDB.__table__,
+            WalletTopupDB.__table__,
+            WalletTransactionDB.__table__,
+            PaymentCollectionAccountDB.__table__,
+        ],
     )
     _ensured = True
 
@@ -142,6 +158,48 @@ def debit_for_case(db: Session, case_id: str, center_id: Optional[str], amount: 
     return {"debited": abs(int(amount)), "balance": int(w.balance_inr), "txnId": t.id}
 
 
+# ---------------------------------------------------------------- collection UPI (QR shown to centres)
+
+def _collection_dict(a: PaymentCollectionAccountDB) -> dict:
+    return {
+        "id": a.id,
+        "label": a.label,
+        "upiId": a.upi_id,
+        "upiName": a.upi_name,
+        "isActive": bool(a.is_active),
+        "isSelected": bool(a.is_selected),
+        "createdAt": a.created_at,
+        "updatedAt": a.updated_at,
+    }
+
+
+def active_collection_upi(db: Session) -> tuple[str, str, Optional[int], Optional[str]]:
+    """Return (upiId, upiName, accountId, label) for the Super Admin–selected receive account."""
+    ensure_wallet_tables()
+    row = (
+        db.query(PaymentCollectionAccountDB)
+        .filter(PaymentCollectionAccountDB.is_selected == True, PaymentCollectionAccountDB.is_active == True)  # noqa: E712
+        .first()
+    )
+    if row:
+        return row.upi_id, row.upi_name or "Radionline", row.id, row.label
+    # Fall back to any active account, then env defaults
+    any_active = (
+        db.query(PaymentCollectionAccountDB)
+        .filter(PaymentCollectionAccountDB.is_active == True)  # noqa: E712
+        .order_by(PaymentCollectionAccountDB.id.asc())
+        .first()
+    )
+    if any_active:
+        return any_active.upi_id, any_active.upi_name or "Radionline", any_active.id, any_active.label
+    return WALLET_UPI_ID, WALLET_UPI_NAME, None, None
+
+
+def _deselect_all(db: Session) -> None:
+    for row in db.query(PaymentCollectionAccountDB).filter(PaymentCollectionAccountDB.is_selected == True).all():  # noqa: E712
+        row.is_selected = False
+
+
 # ---------------------------------------------------------------- serialisers
 
 def _topup_dict(t: WalletTopupDB, center_name: Optional[str] = None) -> dict:
@@ -182,10 +240,13 @@ def _summary(db: Session, center: CenterDB, detail: bool = True) -> dict:
         "insufficient": mode == "prepaid" and bal < charge,
         "lowBalance": mode == "prepaid" and bal < charge * LOW_BALANCE_REPORTS,
         "reportsLeft": (bal // charge) if charge > 0 and bal > 0 else 0,
-        "upiId": WALLET_UPI_ID,
-        "upiName": WALLET_UPI_NAME,
         "defaultTopup": DEFAULT_TOPUP_INR,
     }
+    upi_id, upi_name, collection_id, collection_label = active_collection_upi(db)
+    out["upiId"] = upi_id
+    out["upiName"] = upi_name
+    out["collectionAccountId"] = collection_id
+    out["collectionLabel"] = collection_label
     if detail:
         tops = (
             db.query(WalletTopupDB).filter(WalletTopupDB.center_id == center.id)
@@ -352,3 +413,128 @@ async def reject_topup(topup_id: str, body: Optional[DecisionIn] = None, db: Ses
     except Exception:
         logger.exception("wallet top-up broadcast failed")
     return data
+
+
+# ---------------------------------------------------------------- receive-payment accounts (centre QR)
+
+class CollectionAccountIn(BaseModel):
+    label: str
+    upiId: str
+    upiName: Optional[str] = "Radionline"
+    isActive: bool = True
+    select: bool = False  # if true, make this the account centres pay to
+
+
+def _apply_collection(row: PaymentCollectionAccountDB, body: CollectionAccountIn) -> None:
+    label = " ".join((body.label or "").split())[:120]
+    upi = (body.upiId or "").strip()
+    name = " ".join((body.upiName or "Radionline").split())[:120] or "Radionline"
+    if not label:
+        raise HTTPException(status_code=400, detail="Label is required (e.g. Business ICICI)")
+    if not UPI_RE.fullmatch(upi):
+        raise HTTPException(status_code=400, detail="Invalid UPI ID (e.g. name@okaxis)")
+    row.label = label
+    row.upi_id = upi
+    row.upi_name = name
+    row.is_active = bool(body.isActive)
+    row.updated_at = _now()
+
+
+@router.get("/collection-accounts")
+def list_collection_accounts(db: Session = Depends(get_db), _u: UserDB = Depends(require_roles("SUPER_ADMIN"))):
+    ensure_wallet_tables()
+    rows = (
+        db.query(PaymentCollectionAccountDB)
+        .order_by(PaymentCollectionAccountDB.is_selected.desc(), PaymentCollectionAccountDB.is_active.desc(), PaymentCollectionAccountDB.id.asc())
+        .all()
+    )
+    # Seed env default once so the UI is never empty on a fresh install
+    if not rows and WALLET_UPI_ID:
+        seed = PaymentCollectionAccountDB(
+            label="Default",
+            upi_id=WALLET_UPI_ID,
+            upi_name=WALLET_UPI_NAME or "Radionline",
+            is_active=True,
+            is_selected=True,
+            created_at=_now(),
+        )
+        db.add(seed)
+        db.commit()
+        db.refresh(seed)
+        rows = [seed]
+    active = active_collection_upi(db)
+    return {
+        "accounts": [_collection_dict(r) for r in rows],
+        "active": {
+            "upiId": active[0],
+            "upiName": active[1],
+            "id": active[2],
+            "label": active[3],
+        },
+    }
+
+
+@router.post("/collection-accounts")
+def create_collection_account(
+    body: CollectionAccountIn,
+    db: Session = Depends(get_db),
+    _u: UserDB = Depends(require_roles("SUPER_ADMIN")),
+):
+    ensure_wallet_tables()
+    row = PaymentCollectionAccountDB(created_at=_now(), is_selected=False)
+    _apply_collection(row, body)
+    # First account, or explicit select → become the live QR destination
+    existing = db.query(PaymentCollectionAccountDB).count()
+    if body.select or existing == 0:
+        _deselect_all(db)
+        row.is_selected = True
+        row.is_active = True
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return _collection_dict(row)
+
+
+@router.put("/collection-accounts/{account_id}")
+def update_collection_account(
+    account_id: int,
+    body: CollectionAccountIn,
+    db: Session = Depends(get_db),
+    _u: UserDB = Depends(require_roles("SUPER_ADMIN")),
+):
+    ensure_wallet_tables()
+    row = db.query(PaymentCollectionAccountDB).filter(PaymentCollectionAccountDB.id == account_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Collection account not found")
+    _apply_collection(row, body)
+    if body.select:
+        if not row.is_active:
+            raise HTTPException(status_code=400, detail="Activate the account before selecting it for the QR")
+        _deselect_all(db)
+        row.is_selected = True
+    elif not body.isActive and row.is_selected:
+        row.is_selected = False
+    db.commit()
+    db.refresh(row)
+    return _collection_dict(row)
+
+
+@router.post("/collection-accounts/{account_id}/select")
+def select_collection_account(
+    account_id: int,
+    db: Session = Depends(get_db),
+    _u: UserDB = Depends(require_roles("SUPER_ADMIN")),
+):
+    """Mark this UPI as the one centres see on the Add money QR."""
+    ensure_wallet_tables()
+    row = db.query(PaymentCollectionAccountDB).filter(PaymentCollectionAccountDB.id == account_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Collection account not found")
+    if not row.is_active:
+        raise HTTPException(status_code=400, detail="Activate the account before selecting it")
+    _deselect_all(db)
+    row.is_selected = True
+    row.updated_at = _now()
+    db.commit()
+    db.refresh(row)
+    return _collection_dict(row)

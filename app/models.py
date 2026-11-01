@@ -361,6 +361,23 @@ class PayeeAccountDB(Base):
     updated_at = Column(String(50), nullable=True)
 
 
+class PaymentCollectionAccountDB(Base):
+    """UPI accounts Radionline receives wallet top-ups into.
+    Super Admin picks one as selected; that UPI is what centres see on the Add money QR.
+    Additive table, created on first use."""
+    __tablename__ = "payment_collection_accounts"
+    __table_args__ = {'extend_existing': True}
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    label = Column(String(120), nullable=False)          # e.g. "Business ICICI"
+    upi_id = Column(String(100), nullable=False)
+    upi_name = Column(String(120), nullable=False, default="Radionline")
+    is_active = Column(Boolean, nullable=False, default=True)
+    is_selected = Column(Boolean, nullable=False, default=False)
+    created_at = Column(String(50), nullable=False)
+    updated_at = Column(String(50), nullable=True)
+
+
 class CenterWalletDB(Base):
     """t83: prepaid wallet balance of a centre (INR whole rupees)."""
     __tablename__ = "center_wallets"

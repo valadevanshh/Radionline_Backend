@@ -113,7 +113,7 @@ def save_doctor_core(doc_in: DoctorCreate, db: Session) -> dict:
         "password": hashed_pw,
         "address": doc_in.address,
         "signatureUrl": file_storage.materialize_media_reference(
-            doc_in.signatureUrl,
+            prepare_signature_upload(doc_in.signatureUrl),
             category="doctors",
             entity_id=doc_id,
             subfolder="signature",
@@ -206,6 +206,19 @@ def signature_filename_hint() -> str:
     """Unique name per upload under doctors/{id}/signature, so a stored signature file is
     never overwritten and reports signed earlier keep the image they were signed with."""
     return f"signature-{uuid.uuid4().hex[:12]}"
+
+
+def prepare_signature_upload(value: Optional[str]) -> Optional[str]:
+    """Strip paper background from a new signature data URL; pass through paths / empty."""
+    raw = (value or "").strip()
+    if not raw or not raw.startswith("data:"):
+        return value
+    try:
+        from app.signature_image import clean_signature_data_url
+    except ImportError:
+        from app.signature_image import clean_signature_data_url
+    cleaned = clean_signature_data_url(raw)
+    return cleaned or raw
 
 
 # Profile picture / CV / experience / expertise (My Profile). Same rules as the signature:
@@ -436,8 +449,9 @@ def _apply_profile_update(db: Session, doc: DoctorDB, body: DoctorProfileUpdate)
                 raise HTTPException(status_code=400, detail="Signature image could not be read")
             if size > SIGNATURE_MAX_BYTES:
                 raise HTTPException(status_code=400, detail="Signature image must be 5 MB or smaller")
+            cleaned = prepare_signature_upload(raw) or raw
             meta["signatureUrl"] = file_storage.materialize_media_reference(
-                raw,
+                cleaned,
                 category="doctors",
                 entity_id=doc.id,
                 subfolder="signature",
