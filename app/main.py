@@ -145,6 +145,8 @@ app.include_router(notifications_router.router, prefix=settings.API_PREFIX)
 app.include_router(center_users.router, prefix=settings.API_PREFIX)
 app.include_router(annotations.router, prefix=settings.API_PREFIX)
 app.include_router(admin_users.router, prefix=settings.API_PREFIX)
+from app.routers import managers as managers_router
+app.include_router(managers_router.router, prefix=settings.API_PREFIX)
 app.include_router(payees_router.router, prefix=settings.API_PREFIX)
 app.include_router(wallet_router.router, prefix=settings.API_PREFIX)
 try:

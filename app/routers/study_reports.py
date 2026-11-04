@@ -82,6 +82,8 @@ def signer_public(study) -> Optional[dict]:
     out["signatureUrl"] = file_storage.public_url(snap.get("signaturePath")) if snap.get("signaturePath") else None
     return out
 
+from app.manager_access import require_manager_perm
+
 router = APIRouter(
     prefix="/reports",
     tags=["Study Reports"],
@@ -685,6 +687,9 @@ async def sign_study_report(
     db: Session = Depends(get_db),
     current_user: UserDB = Depends(require_roles("DOCTOR", "SUPER_ADMIN", "MANAGER")),
 ):
+    # MGRPERM:sign_study_report
+    if current_user.role == "MANAGER":
+        raise HTTPException(status_code=403, detail="Managers cannot sign reports")
     case, study = resolve_case_and_study(db, case_id, study_id)
     doctor_may_edit_study(db, current_user, study)
     already_signed = study_report_status(study) == "SIGNED"

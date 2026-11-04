@@ -39,6 +39,8 @@ try:
 except ImportError:
     from app import storage as file_storage
 
+from app.manager_access import require_manager_perm
+
 router = APIRouter(
     prefix="/reports",
     tags=["Reports"],
@@ -442,6 +444,8 @@ def get_reports(
     db: Session = Depends(get_db),
     current_user: UserDB = Depends(get_current_user),
 ):
+    # MGRPERM:get_reports
+    require_manager_perm(current_user, "reports", "read")
     if current_user.role == "CENTER":
         # Every linked centre where this login has Reports >= read
         center_ids = access_svc.center_ids_with(db, current_user, "reports", "read") or []
@@ -607,6 +611,8 @@ async def save_report(
     * Doctor: only cases they can already open (legacy review/sign); cannot create cases.
     * Manager: a new case is staged for Super Admin approval (202); editing goes through
       PATCH /reports/{id} (also approval-gated)."""
+    # MGRPERM:save_report
+    require_manager_perm(current_user, "reports", "write")
     existing_case = db.query(CaseDB).filter(CaseDB.id == report_in.id).first() if report_in.id else None
     existing_report = None
     if report_in.id and existing_case is None:
@@ -1255,6 +1261,8 @@ async def update_case_details(
     * Doctor / others: 403.
     Centre, modality and body parts are not editable (they drive studies and billing).
     Every applied edit is written to the case's activity thread (Chat)."""
+    # MGRPERM:update_case_details
+    require_manager_perm(current_user, "reports", "write")
     case_id = case_ops.resolve_case_id(db, report_id)
     case = db.query(CaseDB).filter(CaseDB.id == case_id).first() if case_id else None
     if not case:
@@ -1311,6 +1319,8 @@ async def delete_report(
     * Super Admin: the case and all its dependent rows are removed at once
       (billing lines and files on disk are kept).
     * Manager: staged as DELETE_CASE for Super Admin approval (202)."""
+    # MGRPERM:delete_report
+    require_manager_perm(current_user, "reports", "delete")
     case_id = case_ops.resolve_case_id(db, report_id)
     if not case_id:
         raise HTTPException(status_code=404, detail="Patient record not found")

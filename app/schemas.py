@@ -29,6 +29,7 @@ class SessionUserResponse(UserResponse):
     multiCenter: Optional[bool] = None
     pagePermissions: Optional[Dict[str, str]] = None
     canManageCenterUsers: Optional[bool] = None
+    managerPermissions: Optional[Dict[str, Dict[str, bool]]] = None
 
 class LoginResponse(BaseModel):
     access_token: str

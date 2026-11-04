@@ -24,6 +24,8 @@ try:
 except ImportError:
     from app import storage as file_storage
 
+from app.manager_access import require_manager_perm
+
 router = APIRouter(
     prefix="/doctors",
     tags=["Doctors"],
@@ -85,6 +87,8 @@ async def save_doctor(
 ):
     """Super Admin saves directly. A Manager only stages the change (create or edit):
     it is applied when a Super Admin approves it (HTTP 202)."""
+    # MGRPERM:save_doctor
+    require_manager_perm(_current_user, "doctors", "write")
     if _current_user.role == "MANAGER":
         exists = bool(doc_in.id) and db.query(DoctorDB).filter(DoctorDB.id == doc_in.id).first() is not None
         try:
@@ -506,6 +510,8 @@ def get_doctor_directory(
     db: Session = Depends(get_db),
     current_user: UserDB = Depends(require_roles(*DIRECTORY_ROLES)),
 ):
+    # MGRPERM:get_doctor_directory
+    require_manager_perm(current_user, "doctors", "read")
     try:
         from app.soft_delete import active_filter
     except ImportError:
@@ -562,6 +568,8 @@ async def freeze_doctor(
     _current_user: UserDB = Depends(require_roles("SUPER_ADMIN", "MANAGER")),
 ):
     """Freeze/unfreeze a doctor. Manager stages for Super Admin approval (202)."""
+    # MGRPERM:freeze_doctor
+    require_manager_perm(_current_user, "doctors", "write")
     try:
         from app.soft_delete import is_deleted
         from app.entity_lifecycle import set_doctor_frozen, snapshot_doctor_row
@@ -605,6 +613,8 @@ async def delete_doctor(
     _current_user: UserDB = Depends(require_roles("SUPER_ADMIN", "MANAGER")),
 ):
     """Only Super Admin and Manager may delete. A Manager's delete waits for Super Admin approval (202)."""
+    # MGRPERM:delete_doctor
+    require_manager_perm(_current_user, "doctors", "delete")
     try:
         from app.soft_delete import is_deleted
         from app.entity_lifecycle import write_audit, snapshot_doctor_row

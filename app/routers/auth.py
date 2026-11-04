@@ -27,6 +27,8 @@ except ImportError:
         get_current_user,
     )
 
+from app.manager_access import require_manager_perm
+
 router = APIRouter(prefix="/auth", tags=["Auth"])
 
 
@@ -117,6 +119,9 @@ def create_or_update_user(
     db: Session = Depends(get_db),
     _current_user: UserDB = Depends(require_roles("SUPER_ADMIN", "MANAGER")),
 ):
+    # MGRPERM:create_or_update_user
+    if _current_user.role == "MANAGER":
+        raise HTTPException(status_code=403, detail="Managers cannot change logins directly; use Doctors / Centers (Super Admin approval)")
     existing = db.query(UserDB).filter(UserDB.email.ilike(user.email)).first()
     # A Manager may only manage Doctor / Center logins (no self-promotion, no admin accounts)
     if _current_user.role == "MANAGER":

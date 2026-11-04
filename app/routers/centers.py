@@ -22,6 +22,8 @@ except ImportError:
     from app import storage as file_storage
     from app import access as access_svc
 
+from app.manager_access import require_manager_perm
+
 router = APIRouter(
     prefix="/centers",
     tags=["Radiology Centers"],
@@ -152,6 +154,9 @@ def list_referrers(center_id: str, db: Session = Depends(get_db), current_user: 
 @router.post("/{center_id}/referrers")
 def add_referrer(center_id: str, body: ReferrerIn, db: Session = Depends(get_db), current_user: UserDB = Depends(get_current_user)):
     """Add (or update by name) a centre's referring doctor, with an optional referral cut."""
+    # MGRPERM:add_referrer
+    if current_user.role == "MANAGER":
+        raise HTTPException(status_code=403, detail="Managers cannot change saved referring doctors directly")
     if current_user.role not in ("SUPER_ADMIN", "MANAGER", "CENTER"):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
     if current_user.role == "CENTER":
@@ -188,6 +193,8 @@ async def save_center(
 ):
     """Super Admin saves directly. A Manager only stages the change (create or edit):
     it is applied when a Super Admin approves it (HTTP 202)."""
+    # MGRPERM:save_center
+    require_manager_perm(_current_user, "centers", "write")
     if _current_user.role == "MANAGER":
         exists = bool(center_in.id) and db.query(CenterDB).filter(CenterDB.id == center_in.id).first() is not None
         try:
@@ -258,7 +265,16 @@ def save_center_core(center_in: CenterCreate, db: Session) -> dict:
         existing.center_name = center_in.centerName
         existing.email = center_in.email
         existing.contact_number = center_in.contactNumber
-        existing.metadata_ = meta_payload
+        # Edit = merge: fields not sent (None) keep their stored value, so an edit
+        # never wipes the login password, letterhead, logo or saved referrers.
+        merged = dict(existing.metadata_ or {})
+        if center_in.letterheadMode is None:
+            meta_payload.pop("letterheadMode", None)
+        for k, v in meta_payload.items():
+            if v is not None:
+                merged[k] = v
+        existing.metadata_ = merged
+        flag_modified(existing, "metadata_")
         db.commit()
         db.refresh(existing)
         saved_c = existing
@@ -315,6 +331,8 @@ async def freeze_center(
     _current_user: UserDB = Depends(require_roles("SUPER_ADMIN", "MANAGER")),
 ):
     """Freeze/unfreeze a centre. Manager stages for Super Admin approval (202)."""
+    # MGRPERM:freeze_center
+    require_manager_perm(_current_user, "centers", "write")
     try:
         from app.soft_delete import is_deleted
         from app.entity_lifecycle import set_center_frozen
@@ -358,6 +376,8 @@ async def delete_center(
     _current_user: UserDB = Depends(require_roles("SUPER_ADMIN", "MANAGER")),
 ):
     """Only Super Admin and Manager may delete. A Manager's delete waits for Super Admin approval (202)."""
+    # MGRPERM:delete_center
+    require_manager_perm(_current_user, "centers", "delete")
     try:
         from app.soft_delete import is_deleted
         from app.entity_lifecycle import write_audit, snapshot_center_row

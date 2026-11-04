@@ -201,6 +201,11 @@ def all_center_count(db: Session) -> int:
     return db.query(CenterDB).count()
 
 
+def _mgr_perms(user):
+    from app.manager_access import manager_permissions
+    return manager_permissions(user)
+
+
 def session_dict(db: Session, user: UserDB) -> dict:
     """user_public_dict + what the UI needs to scope itself:
     centers (CENTER only), centerCount, multiCenter, pagePermissions, canManageCenterUsers."""
@@ -215,6 +220,7 @@ def session_dict(db: Session, user: UserDB) -> dict:
             "multiCenter": count > 1,
             "pagePermissions": None,
             "canManageCenterUsers": user.role == "SUPER_ADMIN",
+            "managerPermissions": _mgr_perms(user),
         })
         return base
     names = {}
