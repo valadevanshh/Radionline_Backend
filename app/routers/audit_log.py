@@ -42,12 +42,6 @@ def list_audit_log(
     db: Session = Depends(get_db),
     _u: UserDB = Depends(require_roles("SUPER_ADMIN")),
 ) -> List[dict]:
-    try:
-        from app.entity_lifecycle import ensure_freeze_and_audit_tables
-        from app.database import engine
-        ensure_freeze_and_audit_tables(engine)
-    except Exception:
-        pass
     q = db.query(AuditLogDB)
     if entityType:
         q = q.filter(AuditLogDB.entity_type == entityType)
