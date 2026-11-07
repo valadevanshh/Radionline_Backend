@@ -558,25 +558,41 @@ zero_line = line_for(doctor_invoice(ADA), "FAKE PATIENT ZERO")
 check("zero tariff pays zero", zero_line and zero_line["amount"] == 0, zero_line)
 check("zero tariff still charges the centre", line_for(center_invoice_for(north), "FAKE PATIENT ZERO")["amount"] == 30)
 
-r = c.put(f"/api/billing/doctor-pricing/{ada_id}", headers=SA, json={"firstView": 30, "additionalView": 15})
-check("saving the default clears the override", r.status_code == 200 and r.json()["isCustom"] is False, r.text)
-default_case = upload(north, ADA, "FAKE PATIENT DEFAULT", [{
-    "bodyPart": "CHEST PA", "views": ["PA"], "images": [], "studyDate": "07-11-2026",
-}])
-sign_all(ADA, default_case)
-check("cleared tariff uses 30", line_for(doctor_invoice(ADA), "FAKE PATIENT DEFAULT")["amount"] == 30)
+bea_id_pay = next(d["id"] for d in c.get("/api/doctors", headers=SA).json() if d.get("email") == "bea@view.test")
+r = c.put(f"/api/billing/doctor-pricing/{bea_id_pay}", headers=SA, json={"firstView": 18, "additionalView": 9})
+check("other doctor historical tariff saved", r.status_code == 200 and r.json()["isCustom"] is True, r.text)
 
+r = c.put(f"/api/billing/doctor-pricing/{ada_id}", headers=SA, json={"clear": True})
+check("clear is a separate reset", r.status_code == 200 and r.json()["isCustom"] is False and r.json()["source"] == "unset", r.text)
 r = c.put(f"/api/billing/center-pricing/{south}", headers=SA, json={
-    "centerFirstStudy": 30, "centerAdditionalStudy": 15, "doctorFirstStudy": 22, "doctorAdditionalStudy": 11,
+    "centerFirstStudy": 30, "centerAdditionalStudy": 15, "doctorFirstStudy": 20, "doctorAdditionalStudy": 10,
 })
-check("centre keeps its own doctor payout", r.status_code == 200, r.text)
+check("centre 20/10 doctor payout left stored", r.status_code == 200, r.text)
 centre_case = upload(south, ADA, "FAKE PATIENT CENTRE RATE", [{
     "bodyPart": "CHEST PA", "views": ["PA"], "images": [], "studyDate": "07-11-2026",
 }])
 sign_all(ADA, centre_case)
 check(
-    "stored centre doctor rate is not replaced by 30",
-    line_for(doctor_invoice(ADA), "FAKE PATIENT CENTRE RATE")["amount"] == 22,
+    "unset doctor uses stored centre 20",
+    line_for(doctor_invoice(ADA), "FAKE PATIENT CENTRE RATE")["amount"] == 20,
+)
+
+r = c.put(f"/api/billing/doctor-pricing/{ada_id}", headers=SA, json={"firstView": 30, "additionalView": 15})
+check("saving 30/15 persists", r.status_code == 200 and r.json()["isCustom"] is True and r.json()["firstView"] == 30 and r.json()["additionalView"] == 15, r.text)
+listed = c.get("/api/billing/doctor-pricing", headers=SA).json()
+ada_row = next(d for d in listed["doctors"] if d["doctorId"] == ada_id)
+bea_row = next(d for d in listed["doctors"] if d["doctorId"] == bea_id_pay)
+check("saved 30/15 still reads 30/15", ada_row["firstView"] == 30 and ada_row["additionalView"] == 15 and ada_row["isCustom"] is True, ada_row)
+check("other doctor custom tariff retained", bea_row["firstView"] == 18 and bea_row["additionalView"] == 9, bea_row)
+two_override = upload(south, ADA, "FAKE PATIENT OVERRIDE", [{
+    "bodyPart": "KNEE AP/LATERAL", "views": ["AP", "LATERAL"], "images": [], "studyDate": "07-11-2026",
+}])
+sign_all(ADA, two_override)
+override_lines = [li for li in doctor_invoice(ADA)["lineItems"] if li["patientName"] == "FAKE PATIENT OVERRIDE"]
+check(
+    "saved 30/15 overrides centre 20/10 for two views",
+    sum(int(li["amount"]) for li in override_lines) == 45,
+    override_lines,
 )
 check("negative rate rejected", c.put(
     f"/api/billing/doctor-pricing/{ada_id}", headers=SA, json={"firstView": -1, "additionalView": 15}

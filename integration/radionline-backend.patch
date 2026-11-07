@@ -1,5 +1,5 @@
 diff --git a/app/billing.py b/app/billing.py
-index 31a321a..43750a2 100644
+index 31a321a..2a10d3b 100644
 --- a/app/billing.py
 +++ b/app/billing.py
 @@ -255,7 +255,18 @@ def create_billing_on_sign_off(
@@ -35,7 +35,7 @@ index 31a321a..43750a2 100644
          doctor_inv = _doctor_inv(doctor_id, doctor_name) if doctor_id else None
          # Line ids are VARCHAR(100). study.id already contains case_id, so long body-part
          # names overflowed (500 on sign, report not saved). Ids that fit stay byte-identical.
-@@ -1028,6 +1040,49 @@ def rates_for_center(db: Session, center_id: Optional[str]) -> "pricing.Rates":
+@@ -1028,6 +1040,50 @@ def rates_for_center(db: Session, center_id: Optional[str]) -> "pricing.Rates":
      )
  
  
@@ -65,8 +65,9 @@ index 31a321a..43750a2 100644
 +def doctor_payout_pair(db: Session, doctor_id: Optional[str], center_id: Optional[str]) -> Tuple[int, int]:
 +    """Rupees for (first view, each additional view) on a new sign-off.
 +
-+    A doctor tariff wins. Otherwise a centre rate card's stored doctor payout wins.
-+    Otherwise the code default (30 / 15). Does not read image counts.
++    A saved doctor tariff wins, including 30/15 and 0. Otherwise a centre rate
++    card's stored doctor payout wins. Otherwise the code fallback (30 / 15).
++    Does not read image counts.
 +    """
 +    personal = explicit_doctor_payout(db, doctor_id)
 +    if personal:
@@ -105,14 +106,16 @@ index 67dd57f..854d47a 100644
  CURRENCY = "INR"
  
 diff --git a/app/routers/invoices.py b/app/routers/invoices.py
-index c565005..5780333 100644
+index c565005..92676e5 100644
 --- a/app/routers/invoices.py
 +++ b/app/routers/invoices.py
-@@ -76,9 +76,97 @@ def get_pricing(
+@@ -76,9 +76,106 @@ def get_pricing(
          center_id = None
      out = pricing.pricing_public_dict(billing_svc.rates_for_center(db, center_id))
      out["variesByCenter"] = db.query(CenterPricingDB).first() is not None
-+    out["doctorRateSource"] = "default"
++    # "default" here is the code fallback (30/15), not a claim that every centre pays that.
++    # A doctor with no saved tariff is "unset": a centre card's doctor payout still applies.
++    out["doctorRateSource"] = "unset" if user.role == "DOCTOR" else "default"
 +    if user.role == "DOCTOR":
 +        personal = billing_svc.explicit_doctor_payout(db, _meta(user).get("doctorId"))
 +        if personal:
@@ -123,20 +126,23 @@ index c565005..5780333 100644
  
  
 +class DoctorPayoutUpdate(BaseModel):
-+    firstView: int
-+    additionalView: int
++    """Save a tariff, or clear it. clear=true is the only way to remove a saved tariff."""
++    firstView: Optional[int] = None
++    additionalView: Optional[int] = None
++    clear: bool = False
 +
 +
 +def _doctor_payout_public(db: Session, doc) -> dict:
 +    personal = billing_svc.explicit_doctor_payout(db, doc.id)
-+    first, additional = personal or (pricing.DOCTOR_FIRST_STUDY_INR, pricing.DOCTOR_ADDITIONAL_STUDY_INR)
 +    return {
 +        "doctorId": doc.id,
 +        "doctorName": doc.full_name,
-+        "firstView": first,
-+        "additionalView": additional,
++        "firstView": personal[0] if personal else None,
++        "additionalView": personal[1] if personal else None,
 +        "isCustom": personal is not None,
-+        "source": "doctor" if personal is not None else "default",
++        "source": "doctor" if personal is not None else "unset",
++        "fallbackFirstView": pricing.DOCTOR_FIRST_STUDY_INR,
++        "fallbackAdditionalView": pricing.DOCTOR_ADDITIONAL_STUDY_INR,
 +    }
 +
 +
@@ -145,7 +151,7 @@ index c565005..5780333 100644
 +    db: Session = Depends(get_db),
 +    _user: UserDB = Depends(require_roles("SUPER_ADMIN")),
 +):
-+    """Super Admin: every doctor's payout. No saved tariff means the default 30/15."""
++    """Super Admin: every doctor's saved payout. No row means unset, not an effective 30/15."""
 +    try:
 +        from app.models import DoctorDB
 +        from app.soft_delete import active_filter
@@ -166,10 +172,10 @@ index c565005..5780333 100644
 +    db: Session = Depends(get_db),
 +    user: UserDB = Depends(require_roles("SUPER_ADMIN")),
 +):
-+    """Super Admin: set one doctor's payout for new sign-offs.
++    """Super Admin: save one doctor's payout, or clear it.
 +
-+    Values equal to the current default remove the override. Already billed lines stay.
-+    Managers are not given this route; it matches centre rate cards (Super Admin only).
++    Any valid pair, including 30/15 and 0/0, is stored and overrides centre doctor rates
++    on new sign-offs. clear=true is the only reset. Already billed lines stay.
 +    """
 +    try:
 +        from app.models import DoctorDB
@@ -182,16 +188,20 @@ index c565005..5780333 100644
 +    doc = db.query(DoctorDB).filter(DoctorDB.id == doctor_id).first()
 +    if not doc or is_deleted(doc):
 +        raise HTTPException(status_code=404, detail="Doctor not found")
-+    values = [body.firstView, body.additionalView]
-+    if any((not isinstance(v, int)) or v < 0 or v > pricing.MAX_RATE_INR for v in values):
-+        raise HTTPException(
-+            status_code=422,
-+            detail=f"Each rate must be a whole number of rupees from 0 to {pricing.MAX_RATE_INR}.",
-+        )
++    if body.clear and (body.firstView is not None or body.additionalView is not None):
++        raise HTTPException(status_code=422, detail="Clear the tariff on its own, without sending amounts.")
 +    meta = dict(doc.metadata_ or {})
-+    if values == [pricing.DOCTOR_FIRST_STUDY_INR, pricing.DOCTOR_ADDITIONAL_STUDY_INR]:
++    if body.clear:
 +        meta.pop("payoutRates", None)
 +    else:
++        if body.firstView is None or body.additionalView is None:
++            raise HTTPException(status_code=422, detail="firstView and additionalView are required.")
++        values = [body.firstView, body.additionalView]
++        if any((not isinstance(v, int)) or isinstance(v, bool) or v < 0 or v > pricing.MAX_RATE_INR for v in values):
++            raise HTTPException(
++                status_code=422,
++                detail=f"Each rate must be a whole number of rupees from 0 to {pricing.MAX_RATE_INR}.",
++            )
 +        meta["payoutRates"] = {"firstView": body.firstView, "additionalView": body.additionalView}
 +    doc.metadata_ = meta
 +    flag_modified(doc, "metadata_")
@@ -494,10 +504,10 @@ index 0946349..1b5cb4d 100644
  def clean_signature_data_url(data_url: str) -> Optional[str]:
 diff --git a/scripts/preview_doctor_default_rates.py b/scripts/preview_doctor_default_rates.py
 new file mode 100644
-index 0000000..fd41888
+index 0000000..9a8daae
 --- /dev/null
 +++ b/scripts/preview_doctor_default_rates.py
-@@ -0,0 +1,69 @@
+@@ -0,0 +1,70 @@
 +"""Read-only note for the doctor payout default change (20/10 -> 30/15).
 +
 +Does not UPDATE, DELETE, or INSERT. Does not reprice signed, paid, or historical lines.
@@ -508,8 +518,9 @@ index 0000000..fd41888
 +
 +What is left alone:
 +  center_pricing.doctor_first_inr / doctor_additional_inr, including rows still stored
-+  as 20/10. Those stay the centre's doctor payout until someone edits that centre.
-+  A doctor's metadata.payoutRates, when present, stays and wins over both.
++  as 20/10. Those stay the centre's doctor payout for doctors with no saved tariff.
++  A doctor's metadata.payoutRates, when present, stays and wins over the centre,
++  including an explicit 30/15 or 0. Only a separate clear removes it.
 +  Invoice line amounts already written are not modified.
 +
 +Take a database backup before deploy. This script only prints.
@@ -651,7 +662,7 @@ index 0000000..a8f208d
 +if failed:
 +    sys.exit(1)
 diff --git a/tests/test_view_billing_and_deletion.py b/tests/test_view_billing_and_deletion.py
-index 3d563c5..a3e0eab 100644
+index 3d563c5..b1671c4 100644
 --- a/tests/test_view_billing_and_deletion.py
 +++ b/tests/test_view_billing_and_deletion.py
 @@ -328,12 +328,12 @@ if inv:
@@ -692,7 +703,7 @@ index 3d563c5..a3e0eab 100644
  south_re = center_invoice_for(south)
  re_lines = [li for li in (south_re or {}).get("lineItems") or [] if li["patientName"] == "FAKE PATIENT REASSIGN"]
  check("centre not rebilled on reassign", len(re_lines) == 1 and re_lines[0]["amount"] == 45, re_lines)
-@@ -531,6 +534,67 @@ open_doc = doctor_invoice(ADA)
+@@ -531,6 +534,83 @@ open_doc = doctor_invoice(ADA)
  check("orphan row hidden", line_for(open_doc, "FAKE PATIENT ORPHAN") is None, open_doc)
  check("combo patient still present", line_for(open_doc, "FAKE PATIENT COMBO") is not None)
  
@@ -720,25 +731,41 @@ index 3d563c5..a3e0eab 100644
 +check("zero tariff pays zero", zero_line and zero_line["amount"] == 0, zero_line)
 +check("zero tariff still charges the centre", line_for(center_invoice_for(north), "FAKE PATIENT ZERO")["amount"] == 30)
 +
-+r = c.put(f"/api/billing/doctor-pricing/{ada_id}", headers=SA, json={"firstView": 30, "additionalView": 15})
-+check("saving the default clears the override", r.status_code == 200 and r.json()["isCustom"] is False, r.text)
-+default_case = upload(north, ADA, "FAKE PATIENT DEFAULT", [{
-+    "bodyPart": "CHEST PA", "views": ["PA"], "images": [], "studyDate": "07-11-2026",
-+}])
-+sign_all(ADA, default_case)
-+check("cleared tariff uses 30", line_for(doctor_invoice(ADA), "FAKE PATIENT DEFAULT")["amount"] == 30)
++bea_id_pay = next(d["id"] for d in c.get("/api/doctors", headers=SA).json() if d.get("email") == "bea@view.test")
++r = c.put(f"/api/billing/doctor-pricing/{bea_id_pay}", headers=SA, json={"firstView": 18, "additionalView": 9})
++check("other doctor historical tariff saved", r.status_code == 200 and r.json()["isCustom"] is True, r.text)
 +
++r = c.put(f"/api/billing/doctor-pricing/{ada_id}", headers=SA, json={"clear": True})
++check("clear is a separate reset", r.status_code == 200 and r.json()["isCustom"] is False and r.json()["source"] == "unset", r.text)
 +r = c.put(f"/api/billing/center-pricing/{south}", headers=SA, json={
-+    "centerFirstStudy": 30, "centerAdditionalStudy": 15, "doctorFirstStudy": 22, "doctorAdditionalStudy": 11,
++    "centerFirstStudy": 30, "centerAdditionalStudy": 15, "doctorFirstStudy": 20, "doctorAdditionalStudy": 10,
 +})
-+check("centre keeps its own doctor payout", r.status_code == 200, r.text)
++check("centre 20/10 doctor payout left stored", r.status_code == 200, r.text)
 +centre_case = upload(south, ADA, "FAKE PATIENT CENTRE RATE", [{
 +    "bodyPart": "CHEST PA", "views": ["PA"], "images": [], "studyDate": "07-11-2026",
 +}])
 +sign_all(ADA, centre_case)
 +check(
-+    "stored centre doctor rate is not replaced by 30",
-+    line_for(doctor_invoice(ADA), "FAKE PATIENT CENTRE RATE")["amount"] == 22,
++    "unset doctor uses stored centre 20",
++    line_for(doctor_invoice(ADA), "FAKE PATIENT CENTRE RATE")["amount"] == 20,
++)
++
++r = c.put(f"/api/billing/doctor-pricing/{ada_id}", headers=SA, json={"firstView": 30, "additionalView": 15})
++check("saving 30/15 persists", r.status_code == 200 and r.json()["isCustom"] is True and r.json()["firstView"] == 30 and r.json()["additionalView"] == 15, r.text)
++listed = c.get("/api/billing/doctor-pricing", headers=SA).json()
++ada_row = next(d for d in listed["doctors"] if d["doctorId"] == ada_id)
++bea_row = next(d for d in listed["doctors"] if d["doctorId"] == bea_id_pay)
++check("saved 30/15 still reads 30/15", ada_row["firstView"] == 30 and ada_row["additionalView"] == 15 and ada_row["isCustom"] is True, ada_row)
++check("other doctor custom tariff retained", bea_row["firstView"] == 18 and bea_row["additionalView"] == 9, bea_row)
++two_override = upload(south, ADA, "FAKE PATIENT OVERRIDE", [{
++    "bodyPart": "KNEE AP/LATERAL", "views": ["AP", "LATERAL"], "images": [], "studyDate": "07-11-2026",
++}])
++sign_all(ADA, two_override)
++override_lines = [li for li in doctor_invoice(ADA)["lineItems"] if li["patientName"] == "FAKE PATIENT OVERRIDE"]
++check(
++    "saved 30/15 overrides centre 20/10 for two views",
++    sum(int(li["amount"]) for li in override_lines) == 45,
++    override_lines,
 +)
 +check("negative rate rejected", c.put(
 +    f"/api/billing/doctor-pricing/{ada_id}", headers=SA, json={"firstView": -1, "additionalView": 15}

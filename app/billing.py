@@ -1066,8 +1066,9 @@ def explicit_doctor_payout(db: Session, doctor_id: Optional[str]) -> Optional[Tu
 def doctor_payout_pair(db: Session, doctor_id: Optional[str], center_id: Optional[str]) -> Tuple[int, int]:
     """Rupees for (first view, each additional view) on a new sign-off.
 
-    A doctor tariff wins. Otherwise a centre rate card's stored doctor payout wins.
-    Otherwise the code default (30 / 15). Does not read image counts.
+    A saved doctor tariff wins, including 30/15 and 0. Otherwise a centre rate
+    card's stored doctor payout wins. Otherwise the code fallback (30 / 15).
+    Does not read image counts.
     """
     personal = explicit_doctor_payout(db, doctor_id)
     if personal:

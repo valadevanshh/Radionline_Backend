@@ -76,7 +76,9 @@ def get_pricing(
         center_id = None
     out = pricing.pricing_public_dict(billing_svc.rates_for_center(db, center_id))
     out["variesByCenter"] = db.query(CenterPricingDB).first() is not None
-    out["doctorRateSource"] = "default"
+    # "default" here is the code fallback (30/15), not a claim that every centre pays that.
+    # A doctor with no saved tariff is "unset": a centre card's doctor payout still applies.
+    out["doctorRateSource"] = "unset" if user.role == "DOCTOR" else "default"
     if user.role == "DOCTOR":
         personal = billing_svc.explicit_doctor_payout(db, _meta(user).get("doctorId"))
         if personal:
@@ -87,20 +89,23 @@ def get_pricing(
 
 
 class DoctorPayoutUpdate(BaseModel):
-    firstView: int
-    additionalView: int
+    """Save a tariff, or clear it. clear=true is the only way to remove a saved tariff."""
+    firstView: Optional[int] = None
+    additionalView: Optional[int] = None
+    clear: bool = False
 
 
 def _doctor_payout_public(db: Session, doc) -> dict:
     personal = billing_svc.explicit_doctor_payout(db, doc.id)
-    first, additional = personal or (pricing.DOCTOR_FIRST_STUDY_INR, pricing.DOCTOR_ADDITIONAL_STUDY_INR)
     return {
         "doctorId": doc.id,
         "doctorName": doc.full_name,
-        "firstView": first,
-        "additionalView": additional,
+        "firstView": personal[0] if personal else None,
+        "additionalView": personal[1] if personal else None,
         "isCustom": personal is not None,
-        "source": "doctor" if personal is not None else "default",
+        "source": "doctor" if personal is not None else "unset",
+        "fallbackFirstView": pricing.DOCTOR_FIRST_STUDY_INR,
+        "fallbackAdditionalView": pricing.DOCTOR_ADDITIONAL_STUDY_INR,
     }
 
 
@@ -109,7 +114,7 @@ def list_doctor_pricing(
     db: Session = Depends(get_db),
     _user: UserDB = Depends(require_roles("SUPER_ADMIN")),
 ):
-    """Super Admin: every doctor's payout. No saved tariff means the default 30/15."""
+    """Super Admin: every doctor's saved payout. No row means unset, not an effective 30/15."""
     try:
         from app.models import DoctorDB
         from app.soft_delete import active_filter
@@ -130,10 +135,10 @@ def update_doctor_pricing(
     db: Session = Depends(get_db),
     user: UserDB = Depends(require_roles("SUPER_ADMIN")),
 ):
-    """Super Admin: set one doctor's payout for new sign-offs.
+    """Super Admin: save one doctor's payout, or clear it.
 
-    Values equal to the current default remove the override. Already billed lines stay.
-    Managers are not given this route; it matches centre rate cards (Super Admin only).
+    Any valid pair, including 30/15 and 0/0, is stored and overrides centre doctor rates
+    on new sign-offs. clear=true is the only reset. Already billed lines stay.
     """
     try:
         from app.models import DoctorDB
@@ -146,16 +151,20 @@ def update_doctor_pricing(
     doc = db.query(DoctorDB).filter(DoctorDB.id == doctor_id).first()
     if not doc or is_deleted(doc):
         raise HTTPException(status_code=404, detail="Doctor not found")
-    values = [body.firstView, body.additionalView]
-    if any((not isinstance(v, int)) or v < 0 or v > pricing.MAX_RATE_INR for v in values):
-        raise HTTPException(
-            status_code=422,
-            detail=f"Each rate must be a whole number of rupees from 0 to {pricing.MAX_RATE_INR}.",
-        )
+    if body.clear and (body.firstView is not None or body.additionalView is not None):
+        raise HTTPException(status_code=422, detail="Clear the tariff on its own, without sending amounts.")
     meta = dict(doc.metadata_ or {})
-    if values == [pricing.DOCTOR_FIRST_STUDY_INR, pricing.DOCTOR_ADDITIONAL_STUDY_INR]:
+    if body.clear:
         meta.pop("payoutRates", None)
     else:
+        if body.firstView is None or body.additionalView is None:
+            raise HTTPException(status_code=422, detail="firstView and additionalView are required.")
+        values = [body.firstView, body.additionalView]
+        if any((not isinstance(v, int)) or isinstance(v, bool) or v < 0 or v > pricing.MAX_RATE_INR for v in values):
+            raise HTTPException(
+                status_code=422,
+                detail=f"Each rate must be a whole number of rupees from 0 to {pricing.MAX_RATE_INR}.",
+            )
         meta["payoutRates"] = {"firstView": body.firstView, "additionalView": body.additionalView}
     doc.metadata_ = meta
     flag_modified(doc, "metadata_")

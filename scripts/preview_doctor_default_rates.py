@@ -8,8 +8,9 @@ What changes in code:
 
 What is left alone:
   center_pricing.doctor_first_inr / doctor_additional_inr, including rows still stored
-  as 20/10. Those stay the centre's doctor payout until someone edits that centre.
-  A doctor's metadata.payoutRates, when present, stays and wins over both.
+  as 20/10. Those stay the centre's doctor payout for doctors with no saved tariff.
+  A doctor's metadata.payoutRates, when present, stays and wins over the centre,
+  including an explicit 30/15 or 0. Only a separate clear removes it.
   Invoice line amounts already written are not modified.
 
 Take a database backup before deploy. This script only prints.

@@ -1,21 +1,30 @@
 diff -ruN a/app/dashboard/doctor-earnings/page.tsx b/app/dashboard/doctor-earnings/page.tsx
 --- a/app/dashboard/doctor-earnings/page.tsx	2026-11-07 19:21:22.029880801 +0000
-+++ b/app/dashboard/doctor-earnings/page.tsx	2026-11-07 19:26:48.475940967 +0000
-@@ -94,8 +94,9 @@
++++ b/app/dashboard/doctor-earnings/page.tsx	2026-11-07 19:29:39.959436590 +0000
+@@ -94,8 +94,18 @@
                <h1 className="text-base font-bold text-slate-900">Doctor Earnings</h1>
                <p className="text-[11px] text-slate-500 font-mono">
                  Monthly payouts (IST) · {formatPeriodLabel(periodFilter)} ·{' '}
 -                {pricing?.variesByCenter ? 'Default: ' : ''}₹{pricing?.doctor?.firstStudy ?? 20} first · ₹
 -                {pricing?.doctor?.additionalStudy ?? 10} additional per view
-+                {pricing?.doctorRateSource === 'doctor' ? 'Your payout ' : 'Default: '}₹{pricing?.doctor?.firstStudy ?? 30} first · ₹
-+                {pricing?.doctor?.additionalStudy ?? 15} additional per view
-+                {pricing?.variesByCenter && pricing?.doctorRateSource !== 'doctor' ? ' · a centre card can set a different payout' : ''}
++                {pricing?.doctorRateSource === 'doctor' ? (
++                  <>
++                    Your payout ₹{pricing?.doctor?.firstStudy ?? 30} first · ₹
++                    {pricing?.doctor?.additionalStudy ?? 15} additional per view
++                  </>
++                ) : (
++                  <>
++                    No personal tariff. A centre&apos;s saved doctor payout is used; otherwise ₹
++                    {pricing?.default?.doctor?.firstStudy ?? 30} first · ₹
++                    {pricing?.default?.doctor?.additionalStudy ?? 15} additional per view
++                  </>
++                )}
                </p>
              </div>
            </div>
 diff -ruN a/app/dashboard/doctors/page.tsx b/app/dashboard/doctors/page.tsx
 --- a/app/dashboard/doctors/page.tsx	2026-11-07 19:21:22.033880717 +0000
-+++ b/app/dashboard/doctors/page.tsx	2026-11-07 19:23:53.068575516 +0000
++++ b/app/dashboard/doctors/page.tsx	2026-11-07 19:29:48.171418163 +0000
 @@ -12,6 +12,7 @@
  import DoctorSignatureForm from '@/components/DoctorSignatureForm';
  import DoctorAvatar from '@/components/DoctorAvatar';
@@ -30,7 +39,7 @@ diff -ruN a/app/dashboard/doctors/page.tsx b/app/dashboard/doctors/page.tsx
    const [resetTarget, setResetTarget] = useState<ResetTarget | null>(null);
 +  const [payoutDoctor, setPayoutDoctor] = useState<Doctor | null>(null);
 +  const [payoutDefaults, setPayoutDefaults] = useState({ firstView: 30, additionalView: 15 });
-+  const [payoutById, setPayoutById] = useState<Record<string, { firstView: number; additionalView: number; isCustom: boolean }>>({});
++  const [payoutById, setPayoutById] = useState<Record<string, { firstView: number | null; additionalView: number | null; isCustom: boolean }>>({});
  
    useEffect(() => {
      const checkAuth = () => {
@@ -43,7 +52,7 @@ diff -ruN a/app/dashboard/doctors/page.tsx b/app/dashboard/doctors/page.tsx
 +    try {
 +      const data = await ApiClient.getDoctorPricing();
 +      setPayoutDefaults(data.default);
-+      const map: Record<string, { firstView: number; additionalView: number; isCustom: boolean }> = {};
++      const map: Record<string, { firstView: number | null; additionalView: number | null; isCustom: boolean }> = {};
 +      for (const row of data.doctors) map[row.doctorId] = row;
 +      setPayoutById(map);
 +    } catch {
@@ -57,7 +66,7 @@ diff -ruN a/app/dashboard/doctors/page.tsx b/app/dashboard/doctors/page.tsx
    const isManager = session?.role === 'MANAGER';
  
    const loadDoctors = useCallback(async () => {
-@@ -392,6 +412,21 @@
+@@ -392,6 +412,23 @@
                              type="button"
                              onClick={(e) => {
                                e.stopPropagation();
@@ -68,7 +77,9 @@ diff -ruN a/app/dashboard/doctors/page.tsx b/app/dashboard/doctors/page.tsx
 +                            aria-label={`Set payout for ${doc.fullName}`}
 +                            data-testid={`doctor-payout-${doc.id}`}
 +                          >
-+                            {formatRates((payoutById[doc.id] || payoutDefaults).firstView, (payoutById[doc.id] || payoutDefaults).additionalView)}
++                            {payoutById[doc.id]?.isCustom
++                              ? formatRates(payoutById[doc.id].firstView || 0, payoutById[doc.id].additionalView || 0)
++                              : 'Uses centre'}
 +                          </button>
 +                        )}
 +                        {canEditSignature && (
@@ -79,7 +90,7 @@ diff -ruN a/app/dashboard/doctors/page.tsx b/app/dashboard/doctors/page.tsx
                                setResetTarget({ ref: `doctor:${doc.id}`, name: doc.fullName, detail: doc.email });
                              }}
                              className="p-1.5 -mt-1.5 text-slate-400 hover:text-[#009ef7] transition-colors cursor-pointer rounded hover:bg-sky-50 shrink-0"
-@@ -514,6 +549,21 @@
+@@ -514,6 +551,22 @@
          onSave={handleAddDoctor}
        />
        <ResetPasswordModal target={resetTarget} onClose={() => setResetTarget(null)} />
@@ -87,8 +98,9 @@ diff -ruN a/app/dashboard/doctors/page.tsx b/app/dashboard/doctors/page.tsx
 +        <DoctorPayoutModal
 +          doctorId={payoutDoctor.id}
 +          doctorName={payoutDoctor.fullName}
-+          firstView={(payoutById[payoutDoctor.id] || payoutDefaults).firstView}
-+          additionalView={(payoutById[payoutDoctor.id] || payoutDefaults).additionalView}
++          firstView={payoutById[payoutDoctor.id]?.isCustom ? payoutById[payoutDoctor.id].firstView : null}
++          additionalView={payoutById[payoutDoctor.id]?.isCustom ? payoutById[payoutDoctor.id].additionalView : null}
++          isCustom={Boolean(payoutById[payoutDoctor.id]?.isCustom)}
 +          defaultFirst={payoutDefaults.firstView}
 +          defaultAdditional={payoutDefaults.additionalView}
 +          onClose={() => setPayoutDoctor(null)}
@@ -103,13 +115,18 @@ diff -ruN a/app/dashboard/doctors/page.tsx b/app/dashboard/doctors/page.tsx
  }
 diff -ruN a/app/dashboard/invoices/page.tsx b/app/dashboard/invoices/page.tsx
 --- a/app/dashboard/invoices/page.tsx	2026-11-07 19:21:22.033880717 +0000
-+++ b/app/dashboard/invoices/page.tsx	2026-11-07 19:23:20.936686617 +0000
-@@ -229,7 +229,7 @@
++++ b/app/dashboard/invoices/page.tsx	2026-11-07 19:29:40.919434421 +0000
+@@ -227,9 +227,10 @@
+               <h1 className="text-base sm:text-lg font-bold text-slate-900">Invoices & Billing</h1>
+               <p className="text-[11px] text-slate-500 font-mono">
                  Monthly settlement (IST) ·{' '}
-                 {pricing?.variesByCenter ? 'Default: ' : ''}
-                 Center ₹{pricing?.center?.firstStudy ?? 30}/+{pricing?.center?.additionalStudy ?? 15} · Doctor ₹
+-                {pricing?.variesByCenter ? 'Default: ' : ''}
+-                Center ₹{pricing?.center?.firstStudy ?? 30}/+{pricing?.center?.additionalStudy ?? 15} · Doctor ₹
 -                {pricing?.doctor?.firstStudy ?? 20}/+{pricing?.doctor?.additionalStudy ?? 10} per view
-+                {pricing?.doctor?.firstStudy ?? 30}/+{pricing?.doctor?.additionalStudy ?? 15} per view
++                Centre fallback ₹{pricing?.default?.center?.firstStudy ?? pricing?.center?.firstStudy ?? 30}/+
++                {pricing?.default?.center?.additionalStudy ?? pricing?.center?.additionalStudy ?? 15} · Doctor fallback ₹
++                {pricing?.default?.doctor?.firstStudy ?? 30}/+{pricing?.default?.doctor?.additionalStudy ?? 15} per view
++                {' '}when neither the doctor nor the centre has a saved doctor payout
                </p>
              </div>
            </div>
@@ -136,8 +153,8 @@ diff -ruN a/components/A4ReportEditor.tsx b/components/A4ReportEditor.tsx
            if (el) areas.current.set(key, el);
 diff -ruN a/components/CenterPricingModal.tsx b/components/CenterPricingModal.tsx
 --- a/components/CenterPricingModal.tsx	2026-11-07 19:21:22.017881050 +0000
-+++ b/components/CenterPricingModal.tsx	2026-11-07 19:23:40.940612987 +0000
-@@ -159,3 +159,102 @@
++++ b/components/CenterPricingModal.tsx	2026-11-07 19:29:46.007422989 +0000
+@@ -159,3 +159,119 @@
      </Modal>
    );
  }
@@ -148,6 +165,7 @@ diff -ruN a/components/CenterPricingModal.tsx b/components/CenterPricingModal.ts
 +  doctorName,
 +  firstView,
 +  additionalView,
++  isCustom,
 +  defaultFirst,
 +  defaultAdditional,
 +  onClose,
@@ -155,20 +173,20 @@ diff -ruN a/components/CenterPricingModal.tsx b/components/CenterPricingModal.ts
 +}: {
 +  doctorId: string;
 +  doctorName: string;
-+  firstView: number;
-+  additionalView: number;
++  firstView: number | null;
++  additionalView: number | null;
++  isCustom: boolean;
 +  defaultFirst: number;
 +  defaultAdditional: number;
 +  onClose: () => void;
 +  onSaved: () => void;
 +}) {
-+  const [first, setFirst] = useState(String(firstView));
-+  const [additional, setAdditional] = useState(String(additionalView));
++  const [first, setFirst] = useState(String(firstView ?? defaultFirst));
++  const [additional, setAdditional] = useState(String(additionalView ?? defaultAdditional));
 +  const [saving, setSaving] = useState(false);
 +  const [error, setError] = useState('');
 +  const clean = (v: string) => /^\d+$/.test(v.trim()) && Number(v) <= MAX_RATE;
 +  const valid = clean(first) && clean(additional);
-+  const sameAsDefault = valid && Number(first) === defaultFirst && Number(additional) === defaultAdditional;
 +
 +  const save = async (e?: React.FormEvent) => {
 +    e?.preventDefault();
@@ -185,6 +203,20 @@ diff -ruN a/components/CenterPricingModal.tsx b/components/CenterPricingModal.ts
 +    }
 +  };
 +
++  const clearTariff = async () => {
++    if (saving) return;
++    setSaving(true);
++    setError('');
++    try {
++      await ApiClient.updateDoctorPricing(doctorId, { clear: true });
++      onSaved();
++    } catch (err) {
++      setError(apiErrorMessage(err, 'Could not clear the payout.'));
++    } finally {
++      setSaving(false);
++    }
++  };
++
 +  return (
 +    <Modal
 +      open
@@ -196,14 +228,11 @@ diff -ruN a/components/CenterPricingModal.tsx b/components/CenterPricingModal.ts
 +          <button
 +            type="button"
 +            className="text-xs font-semibold text-[#009ef7] hover:underline disabled:text-slate-400 disabled:no-underline"
-+            disabled={sameAsDefault}
-+            onClick={() => {
-+              setFirst(String(defaultFirst));
-+              setAdditional(String(defaultAdditional));
-+            }}
-+            data-testid="doctor-payout-defaults"
++            disabled={!isCustom || saving}
++            onClick={clearTariff}
++            data-testid="doctor-payout-clear"
 +          >
-+            Use defaults
++            Clear personal tariff
 +          </button>
 +          <div className="flex gap-2">
 +            <Button type="button" variant="secondary" onClick={onClose}>Cancel</Button>
@@ -232,7 +261,12 @@ diff -ruN a/components/CenterPricingModal.tsx b/components/CenterPricingModal.ts
 +              A 3-view case pays {RS}{Number(first) + 2 * Number(additional)}.
 +            </p>
 +          )}
-+          <p className="text-slate-500">Default {formatRates(defaultFirst, defaultAdditional)}. A saved payout overrides that default for this doctor. New sign-offs only.</p>
++          <p className="text-slate-500">
++            {isCustom
++              ? `Saved tariff. It overrides every centre doctor payout for new sign-offs, including ${formatRates(defaultFirst, defaultAdditional)}.`
++              : `Not saved. This doctor is paid from each centre's doctor payout, or ${formatRates(defaultFirst, defaultAdditional)} where that centre has none. Saving any amount, including ${formatRates(defaultFirst, defaultAdditional)}, stores a personal tariff.`}
++          </p>
++          <p className="text-slate-500">Clear personal tariff is the only reset. New sign-offs only.</p>
 +          {!valid && <p className="text-rose-600">Enter whole rupees from 0 to {MAX_RATE}.</p>}
 +          {error && <p className="text-rose-600" role="alert">{error}</p>}
 +        </div>
@@ -290,16 +324,20 @@ diff -ruN a/components/DoctorSignatureForm.tsx b/components/DoctorSignatureForm.
            {regNo.trim() ? <div>{formatRegNo(regNo)}</div> : null}
 diff -ruN a/lib/api-client.ts b/lib/api-client.ts
 --- a/lib/api-client.ts	2026-11-07 19:21:22.025880885 +0000
-+++ b/lib/api-client.ts	2026-11-07 19:23:35.756630526 +0000
-@@ -946,6 +946,7 @@
++++ b/lib/api-client.ts	2026-11-07 19:29:39.163438393 +0000
+@@ -946,6 +946,11 @@
        doctor: { firstStudy: number; additionalStudy: number };
        isDefault?: boolean;
        variesByCenter?: boolean;
-+      doctorRateSource?: 'default' | 'doctor';
++      doctorRateSource?: 'default' | 'doctor' | 'unset';
++      default?: {
++        center: { firstStudy: number; additionalStudy: number };
++        doctor: { firstStudy: number; additionalStudy: number };
++      };
        allowedModalities: string[];
      }>(`/billing/pricing${centerId ? `?centerId=${encodeURIComponent(centerId)}` : ''}`);
    },
-@@ -963,6 +964,22 @@
+@@ -963,6 +968,31 @@
      });
    },
  
@@ -307,12 +345,21 @@ diff -ruN a/lib/api-client.ts b/lib/api-client.ts
 +  async getDoctorPricing() {
 +    return fetchJson<{
 +      default: { firstView: number; additionalView: number };
-+      doctors: Array<{ doctorId: string; doctorName: string; firstView: number; additionalView: number; isCustom: boolean; source: string }>;
++      doctors: Array<{
++        doctorId: string;
++        doctorName: string;
++        firstView: number | null;
++        additionalView: number | null;
++        isCustom: boolean;
++        source: string;
++        fallbackFirstView: number;
++        fallbackAdditionalView: number;
++      }>;
 +    }>('/billing/doctor-pricing');
 +  },
 +
 +  /** Super Admin: set one doctor's payout for new sign-offs. Matches the default to clear it. */
-+  async updateDoctorPricing(doctorId: string, body: { firstView: number; additionalView: number }) {
++  async updateDoctorPricing(doctorId: string, body: { firstView?: number; additionalView?: number; clear?: boolean }) {
 +    return fetchJson<{ doctorId: string; doctorName: string; firstView: number; additionalView: number; isCustom: boolean; source: string }>(
 +      `/billing/doctor-pricing/${encodeURIComponent(doctorId)}`,
 +      { method: 'PUT', body: JSON.stringify(body) },

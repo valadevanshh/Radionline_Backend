@@ -1,25 +1,18 @@
 {
   "backendBaseline": "526c53a52de78618bac75f494c1a4b35f7907cae",
   "frontendBaseline": "c5b8ea7a67d1aabba0714c3d5b8fd92dae627507",
-  "contentNote": "Workspace backend tree at ab36b4e matches the archive backend bytes after LF normalization. GitHub master does not contain 526c53a. Apply these patches onto the local Darling checkouts of the baselines above, not onto stale GitHub master and not onto the CRLF tar.",
+  "contentNote": "Patches are LF diffs against those baselines. The attached tar is CRLF. GitHub master does not contain 526c53a. Apply onto the local Darling checkouts.",
   "patches": {
     "backend": {
       "file": "integration/radionline-backend.patch",
-      "sha256": "1561423da2e8c0db24bd6347d1c38f64955bf20adb9a93310a5df69d78041a8d",
-      "bytes": 32610,
-      "apply": "git apply radionline-backend.patch"
+      "sha256": "2f1de2b2f9d8dc20e0bd6b61ce0e6cc63e1640e1a34e424a1e44f9e87eb4c8e9",
+      "bytes": 34778
     },
     "frontend": {
       "file": "integration/radionline-frontend.patch",
-      "sha256": "0e2ffb7d6011aa6d04f7fc1d70c95a753a9cbc516f00aea956f20eb79bc8c6c3",
-      "bytes": 34341,
-      "apply": "patch -p1 < radionline-frontend.patch"
+      "sha256": "83ef565ad6b6208150ee8023313e7ba1261f97e7ea9af6eba4b44ff1c2ff65c3",
+      "bytes": 36359
     }
   },
-  "schema": "No new table. Doctor payoutRates lives in doctors.metadata.",
-  "defaults": {
-    "doctorFirstView": 30,
-    "doctorAdditionalView": 15,
-    "centreDoctorRows": "kept as stored"
-  }
+  "doctorTariff": "Any saved pair including 30/15 and 0 persists and overrides centre doctor rates. clear=true is the only reset."
 }
