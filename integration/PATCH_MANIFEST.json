@@ -1,25 +1,18 @@
 {
-  "backendBaseline": "6c704539148a1e8a5d0778af56462ce569ff46f7",
-  "frontendBaseline": "9f72dbc732d3ff7b2e7ab19f3876c5b19e214710",
-  "lineEndings": "Patches are LF, matching the git blobs. The attached sanitized tar stores the same source with CRLF; do not apply these patches onto the CRLF tar bytes. Apply them to the Darling git checkouts of the commits above.",
+  "backendBaseline": "526c53a52de78618bac75f494c1a4b35f7907cae",
+  "frontendBaseline": "c5b8ea7a67d1aabba0714c3d5b8fd92dae627507",
+  "contentNote": "Patches are LF diffs against those baselines. The attached tar is CRLF. GitHub master does not contain 526c53a. Apply onto the local Darling checkouts.",
   "patches": {
     "backend": {
       "file": "integration/radionline-backend.patch",
-      "sha256": "b50147ded9db0286b119047f5f9cf2d4e0d7c50fe59f883efa81032ded5578b8",
-      "bytes": 71940,
-      "apply": "git apply integration/radionline-backend.patch   # from the backend repo at 6c70453"
+      "sha256": "2f1de2b2f9d8dc20e0bd6b61ce0e6cc63e1640e1a34e424a1e44f9e87eb4c8e9",
+      "bytes": 34778
     },
     "frontend": {
       "file": "integration/radionline-frontend.patch",
-      "sha256": "8d1330a192a02b32d7a63c9479ca9813e7454fbcdb44988be0717efb6f1544ef",
-      "bytes": 11841,
-      "apply": "patch -p1 < integration/radionline-frontend.patch   # from the frontend repo at 9f72dbc"
+      "sha256": "83ef565ad6b6208150ee8023313e7ba1261f97e7ea9af6eba4b44ff1c2ff65c3",
+      "bytes": 36359
     }
   },
-  "notInPatch": [
-    "No schema migration.",
-    "Stored line amounts are not repriced. View-count pricing starts at the next sign-off.",
-    "Paid or locked invoices are not changed when a patient is deleted.",
-    "Prepaid wallet CHARGE rows are not credited."
-  ]
+  "doctorTariff": "Any saved pair including 30/15 and 0 persists and overrides centre doctor rates. clear=true is the only reset."
 }

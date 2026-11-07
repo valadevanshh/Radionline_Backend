@@ -1,205 +1,818 @@
-diff -ruN -x node_modules -x .next -x package-lock.json -x tsconfig.tsbuildinfo -x next-env.d.ts a/app/dashboard/center-invoices/page.tsx b/app/dashboard/center-invoices/page.tsx
---- a/app/dashboard/center-invoices/page.tsx	2026-11-07 18:42:39.352009808 +0000
-+++ b/app/dashboard/center-invoices/page.tsx	2026-11-07 18:42:47.272004463 +0000
-@@ -125,7 +125,7 @@
-             <span>Center Invoices & Billing</span>
-           </div>
-         }
--        subtitle={`Monthly invoices (IST) · ₹${pricing?.center?.firstStudy ?? 30} first · ₹${pricing?.center?.additionalStudy ?? 15} additional · ${formatPeriodLabel(periodFilter)}`}
-+        subtitle={`Monthly invoices (IST) · ₹${pricing?.center?.firstStudy ?? 30} first · ₹${pricing?.center?.additionalStudy ?? 15} additional per view · ${formatPeriodLabel(periodFilter)}`}
-         actions={
-           <div className="flex items-center gap-2 flex-wrap">
-             <select
-diff -ruN -x node_modules -x .next -x package-lock.json -x tsconfig.tsbuildinfo -x next-env.d.ts a/app/dashboard/doctor-earnings/page.tsx b/app/dashboard/doctor-earnings/page.tsx
---- a/app/dashboard/doctor-earnings/page.tsx	2026-11-07 18:42:39.348009810 +0000
-+++ b/app/dashboard/doctor-earnings/page.tsx	2026-11-07 18:42:47.020004621 +0000
-@@ -95,7 +95,7 @@
+diff -ruN a/app/dashboard/doctor-earnings/page.tsx b/app/dashboard/doctor-earnings/page.tsx
+--- a/app/dashboard/doctor-earnings/page.tsx	2026-11-07 19:21:22.029880801 +0000
++++ b/app/dashboard/doctor-earnings/page.tsx	2026-11-07 19:29:39.959436590 +0000
+@@ -94,8 +94,18 @@
+               <h1 className="text-base font-bold text-slate-900">Doctor Earnings</h1>
                <p className="text-[11px] text-slate-500 font-mono">
                  Monthly payouts (IST) · {formatPeriodLabel(periodFilter)} ·{' '}
-                 {pricing?.variesByCenter ? 'Default: ' : ''}₹{pricing?.doctor?.firstStudy ?? 20} first · ₹
--                {pricing?.doctor?.additionalStudy ?? 10} additional
-+                {pricing?.doctor?.additionalStudy ?? 10} additional per view
+-                {pricing?.variesByCenter ? 'Default: ' : ''}₹{pricing?.doctor?.firstStudy ?? 20} first · ₹
+-                {pricing?.doctor?.additionalStudy ?? 10} additional per view
++                {pricing?.doctorRateSource === 'doctor' ? (
++                  <>
++                    Your payout ₹{pricing?.doctor?.firstStudy ?? 30} first · ₹
++                    {pricing?.doctor?.additionalStudy ?? 15} additional per view
++                  </>
++                ) : (
++                  <>
++                    No personal tariff. A centre&apos;s saved doctor payout is used; otherwise ₹
++                    {pricing?.default?.doctor?.firstStudy ?? 30} first · ₹
++                    {pricing?.default?.doctor?.additionalStudy ?? 15} additional per view
++                  </>
++                )}
                </p>
              </div>
            </div>
-diff -ruN -x node_modules -x .next -x package-lock.json -x tsconfig.tsbuildinfo -x next-env.d.ts a/app/dashboard/invoices/page.tsx b/app/dashboard/invoices/page.tsx
---- a/app/dashboard/invoices/page.tsx	2026-11-07 18:42:39.352009808 +0000
-+++ b/app/dashboard/invoices/page.tsx	2026-11-07 18:42:47.856004098 +0000
-@@ -229,7 +229,7 @@
-                 Monthly settlement (IST) ·{' '}
-                 {pricing?.variesByCenter ? 'Default: ' : ''}
-                 Center ₹{pricing?.center?.firstStudy ?? 30}/+{pricing?.center?.additionalStudy ?? 15} · Doctor ₹
--                {pricing?.doctor?.firstStudy ?? 20}/+{pricing?.doctor?.additionalStudy ?? 10}
-+                {pricing?.doctor?.firstStudy ?? 20}/+{pricing?.doctor?.additionalStudy ?? 10} per view
-               </p>
-             </div>
-           </div>
-diff -ruN -x node_modules -x .next -x package-lock.json -x tsconfig.tsbuildinfo -x next-env.d.ts a/app/dashboard/radiology/page.tsx b/app/dashboard/radiology/page.tsx
---- a/app/dashboard/radiology/page.tsx	2026-11-07 18:42:39.348009810 +0000
-+++ b/app/dashboard/radiology/page.tsx	2026-11-07 18:42:48.496003702 +0000
-@@ -361,7 +361,7 @@
-                       <div className="col-resizer" onMouseDown={(e) => startResizing('headerBanner', e.clientX, widths.headerBanner)} />
-                     </th>
-                     {isSuperAdmin && (
--                      <th title="Pricing (first / each additional study)" style={{ width: widths.pricing, position: 'relative' }}>
-+                      <th title="Pricing (first / each additional view)" style={{ width: widths.pricing, position: 'relative' }}>
-                         <span>Pricing</span>
-                         <div className="col-resizer" onMouseDown={(e) => startResizing('pricing', e.clientX, widths.pricing)} />
-                       </th>
-@@ -422,7 +422,7 @@
-                         const p = pricingById[c.id];
-                         const r = p || defaultRates;
-                         return (
--                          <td className="p-3.5" title="Centre charge and doctor payout: first study / each additional study">
-+                          <td className="p-3.5" title="Centre charge and doctor payout: first view / each additional view">
-                             {r ? (
-                               <button
-                                 type="button"
-diff -ruN -x node_modules -x .next -x package-lock.json -x tsconfig.tsbuildinfo -x next-env.d.ts a/components/CenterPricingModal.tsx b/components/CenterPricingModal.tsx
---- a/components/CenterPricingModal.tsx	2026-11-07 18:42:39.344009813 +0000
-+++ b/components/CenterPricingModal.tsx	2026-11-07 18:42:46.772004778 +0000
-@@ -31,7 +31,7 @@
-   onSaved: (p: CenterPricing) => void;
+diff -ruN a/app/dashboard/doctors/page.tsx b/app/dashboard/doctors/page.tsx
+--- a/app/dashboard/doctors/page.tsx	2026-11-07 19:21:22.033880717 +0000
++++ b/app/dashboard/doctors/page.tsx	2026-11-07 19:29:48.171418163 +0000
+@@ -12,6 +12,7 @@
+ import DoctorSignatureForm from '@/components/DoctorSignatureForm';
+ import DoctorAvatar from '@/components/DoctorAvatar';
+ import DoctorDetailsModal from '@/components/DoctorDetailsModal';
++import { DoctorPayoutModal, formatRates } from '@/components/CenterPricingModal';
+ import { experienceLabel } from '@/lib/doctor-profile';
+ import { managerCan } from '@/lib/access';
+ 
+@@ -34,6 +35,9 @@
+   const [editDoctor, setEditDoctor] = useState<Doctor | null>(null);
+   // Super Admin: reset a doctor's login password
+   const [resetTarget, setResetTarget] = useState<ResetTarget | null>(null);
++  const [payoutDoctor, setPayoutDoctor] = useState<Doctor | null>(null);
++  const [payoutDefaults, setPayoutDefaults] = useState({ firstView: 30, additionalView: 15 });
++  const [payoutById, setPayoutById] = useState<Record<string, { firstView: number | null; additionalView: number | null; isCustom: boolean }>>({});
+ 
+   useEffect(() => {
+     const checkAuth = () => {
+@@ -59,6 +63,22 @@
+   const canManageDoctors = session?.role === 'SUPER_ADMIN' || managerCan(session, 'doctors', 'write');
+   const canDeleteDoctors = session?.role === 'SUPER_ADMIN' || managerCan(session, 'doctors', 'delete');
+   const canEditSignature = session?.role === 'SUPER_ADMIN';
++  const loadPayouts = useCallback(async () => {
++    if (session?.role !== 'SUPER_ADMIN') return;
++    try {
++      const data = await ApiClient.getDoctorPricing();
++      setPayoutDefaults(data.default);
++      const map: Record<string, { firstView: number | null; additionalView: number | null; isCustom: boolean }> = {};
++      for (const row of data.doctors) map[row.doctorId] = row;
++      setPayoutById(map);
++    } catch {
++      /* payout editor stays on the defaults */
++    }
++  }, [session?.role]);
++
++  useEffect(() => {
++    if (authorized && session?.role === 'SUPER_ADMIN') loadPayouts();
++  }, [authorized, session?.role, loadPayouts]);
+   const isManager = session?.role === 'MANAGER';
+ 
+   const loadDoctors = useCallback(async () => {
+@@ -392,6 +412,23 @@
+                             type="button"
+                             onClick={(e) => {
+                               e.stopPropagation();
++                              setPayoutDoctor(doc);
++                            }}
++                            className="px-1.5 py-1 -mt-1.5 text-[10px] font-bold text-slate-500 hover:text-[#009ef7] cursor-pointer rounded hover:bg-sky-50 shrink-0"
++                            title="Doctor payout"
++                            aria-label={`Set payout for ${doc.fullName}`}
++                            data-testid={`doctor-payout-${doc.id}`}
++                          >
++                            {payoutById[doc.id]?.isCustom
++                              ? formatRates(payoutById[doc.id].firstView || 0, payoutById[doc.id].additionalView || 0)
++                              : 'Uses centre'}
++                          </button>
++                        )}
++                        {canEditSignature && (
++                          <button
++                            type="button"
++                            onClick={(e) => {
++                              e.stopPropagation();
+                               setResetTarget({ ref: `doctor:${doc.id}`, name: doc.fullName, detail: doc.email });
+                             }}
+                             className="p-1.5 -mt-1.5 text-slate-400 hover:text-[#009ef7] transition-colors cursor-pointer rounded hover:bg-sky-50 shrink-0"
+@@ -514,6 +551,22 @@
+         onSave={handleAddDoctor}
+       />
+       <ResetPasswordModal target={resetTarget} onClose={() => setResetTarget(null)} />
++      {payoutDoctor && (
++        <DoctorPayoutModal
++          doctorId={payoutDoctor.id}
++          doctorName={payoutDoctor.fullName}
++          firstView={payoutById[payoutDoctor.id]?.isCustom ? payoutById[payoutDoctor.id].firstView : null}
++          additionalView={payoutById[payoutDoctor.id]?.isCustom ? payoutById[payoutDoctor.id].additionalView : null}
++          isCustom={Boolean(payoutById[payoutDoctor.id]?.isCustom)}
++          defaultFirst={payoutDefaults.firstView}
++          defaultAdditional={payoutDefaults.additionalView}
++          onClose={() => setPayoutDoctor(null)}
++          onSaved={() => {
++            setPayoutDoctor(null);
++            loadPayouts();
++          }}
++        />
++      )}
+     </div>
+   );
  }
+diff -ruN a/app/dashboard/invoices/page.tsx b/app/dashboard/invoices/page.tsx
+--- a/app/dashboard/invoices/page.tsx	2026-11-07 19:21:22.033880717 +0000
++++ b/app/dashboard/invoices/page.tsx	2026-11-07 19:29:40.919434421 +0000
+@@ -227,9 +227,10 @@
+               <h1 className="text-base sm:text-lg font-bold text-slate-900">Invoices & Billing</h1>
+               <p className="text-[11px] text-slate-500 font-mono">
+                 Monthly settlement (IST) ·{' '}
+-                {pricing?.variesByCenter ? 'Default: ' : ''}
+-                Center ₹{pricing?.center?.firstStudy ?? 30}/+{pricing?.center?.additionalStudy ?? 15} · Doctor ₹
+-                {pricing?.doctor?.firstStudy ?? 20}/+{pricing?.doctor?.additionalStudy ?? 10} per view
++                Centre fallback ₹{pricing?.default?.center?.firstStudy ?? pricing?.center?.firstStudy ?? 30}/+
++                {pricing?.default?.center?.additionalStudy ?? pricing?.center?.additionalStudy ?? 15} · Doctor fallback ₹
++                {pricing?.default?.doctor?.firstStudy ?? 30}/+{pricing?.default?.doctor?.additionalStudy ?? 15} per view
++                {' '}when neither the doctor nor the centre has a saved doctor payout
+               </p>
+             </div>
+           </div>
+diff -ruN a/components/A4ReportEditor.tsx b/components/A4ReportEditor.tsx
+--- a/components/A4ReportEditor.tsx	2026-11-07 19:21:22.017881050 +0000
++++ b/components/A4ReportEditor.tsx	2026-11-07 19:23:10.764731103 +0000
+@@ -25,7 +25,7 @@
  
--/** Super Admin: edit one centre's charge and doctor payout (first / each additional study). */
-+/** Super Admin: edit one centre's charge and doctor payout (first / each additional view). */
- export default function CenterPricingModal({ pricing, defaults, onClose, onSaved }: CenterPricingModalProps) {
-   const [values, setValues] = useState<Values | null>(null);
-   const [saving, setSaving] = useState(false);
-@@ -128,20 +128,20 @@
-         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-           <fieldset className="rounded-lg border border-slate-200 p-3 space-y-3">
-             <legend className="px-1 text-[11px] font-bold uppercase tracking-wider text-slate-500">Centre is charged</legend>
--            {field('centerFirst', 'First study')}
--            {field('centerAdditional', 'Each additional study')}
-+            {field('centerFirst', 'First view')}
-+            {field('centerAdditional', 'Each additional view')}
-           </fieldset>
-           <fieldset className="rounded-lg border border-slate-200 p-3 space-y-3">
-             <legend className="px-1 text-[11px] font-bold uppercase tracking-wider text-slate-500">Doctor is paid</legend>
--            {field('doctorFirst', 'First study')}
--            {field('doctorAdditional', 'Each additional study')}
-+            {field('doctorFirst', 'First view')}
-+            {field('doctorAdditional', 'Each additional view')}
-           </fieldset>
-         </div>
+ /** Editor-only rules (the paginated measure uses <p>; the editor uses a div around a textarea) */
+ const EDITOR_PAGES_CSS = `
+-.rn-page .rn-edit { margin: 0 0 8px; }
++.rn-page .rn-edit { margin: 0 0 0.45em; line-height: 1.35; }
+ .rn-page.rn-compact .rn-edit { margin-bottom: 4px; }
+ .rn-page .rn-edit.rn-split-head { margin-bottom: 0; }
+ .rn-page textarea, .rn-page input[type="text"] { font: inherit; letter-spacing: inherit; padding: 0; min-height: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
+@@ -218,7 +218,7 @@
+         rows={1}
+         minHeightPx={0}
+         value={sl.value}
+-        fontClass=""
++        fontClass="rn-body-copy"
+         textareaRef={(el) => {
+           const key = `${k}#${j}`;
+           if (el) areas.current.set(key, el);
+diff -ruN a/components/CenterPricingModal.tsx b/components/CenterPricingModal.tsx
+--- a/components/CenterPricingModal.tsx	2026-11-07 19:21:22.017881050 +0000
++++ b/components/CenterPricingModal.tsx	2026-11-07 19:29:46.007422989 +0000
+@@ -159,3 +159,119 @@
+     </Modal>
+   );
+ }
++
++/** Same rate fields as the centre card, for one doctor's payout only. */
++export function DoctorPayoutModal({
++  doctorId,
++  doctorName,
++  firstView,
++  additionalView,
++  isCustom,
++  defaultFirst,
++  defaultAdditional,
++  onClose,
++  onSaved,
++}: {
++  doctorId: string;
++  doctorName: string;
++  firstView: number | null;
++  additionalView: number | null;
++  isCustom: boolean;
++  defaultFirst: number;
++  defaultAdditional: number;
++  onClose: () => void;
++  onSaved: () => void;
++}) {
++  const [first, setFirst] = useState(String(firstView ?? defaultFirst));
++  const [additional, setAdditional] = useState(String(additionalView ?? defaultAdditional));
++  const [saving, setSaving] = useState(false);
++  const [error, setError] = useState('');
++  const clean = (v: string) => /^\d+$/.test(v.trim()) && Number(v) <= MAX_RATE;
++  const valid = clean(first) && clean(additional);
++
++  const save = async (e?: React.FormEvent) => {
++    e?.preventDefault();
++    if (!valid || saving) return;
++    setSaving(true);
++    setError('');
++    try {
++      await ApiClient.updateDoctorPricing(doctorId, { firstView: Number(first), additionalView: Number(additional) });
++      onSaved();
++    } catch (err) {
++      setError(apiErrorMessage(err, 'Could not save the payout.'));
++    } finally {
++      setSaving(false);
++    }
++  };
++
++  const clearTariff = async () => {
++    if (saving) return;
++    setSaving(true);
++    setError('');
++    try {
++      await ApiClient.updateDoctorPricing(doctorId, { clear: true });
++      onSaved();
++    } catch (err) {
++      setError(apiErrorMessage(err, 'Could not clear the payout.'));
++    } finally {
++      setSaving(false);
++    }
++  };
++
++  return (
++    <Modal
++      open
++      onClose={onClose}
++      title={`Payout - ${doctorName}`}
++      size="md"
++      footer={
++        <div className="flex w-full flex-wrap items-center justify-between gap-2">
++          <button
++            type="button"
++            className="text-xs font-semibold text-[#009ef7] hover:underline disabled:text-slate-400 disabled:no-underline"
++            disabled={!isCustom || saving}
++            onClick={clearTariff}
++            data-testid="doctor-payout-clear"
++          >
++            Clear personal tariff
++          </button>
++          <div className="flex gap-2">
++            <Button type="button" variant="secondary" onClick={onClose}>Cancel</Button>
++            <Button type="submit" form="doctor-payout-form" disabled={!valid || saving} data-testid="doctor-payout-save">
++              {saving ? 'Saving...' : 'Save payout'}
++            </Button>
++          </div>
++        </div>
++      }
++    >
++      <form id="doctor-payout-form" onSubmit={save} className="space-y-4" data-testid="doctor-payout-form">
++        <fieldset className="rounded-lg border border-slate-200 p-3 space-y-3">
++          <legend className="px-1 text-[11px] font-bold uppercase tracking-wider text-slate-500">Doctor is paid</legend>
++          <label className="block">
++            <span className="block text-xs font-semibold text-slate-600 mb-1">First view</span>
++            <TextInput value={first} onChange={(e) => setFirst(e.target.value.replace(/[^\d]/g, ''))} inputMode="numeric" maxLength={6} leftIcon={<span className="text-sm">{RS}</span>} data-testid="doctor-payout-first" aria-label="First view" />
++          </label>
++          <label className="block">
++            <span className="block text-xs font-semibold text-slate-600 mb-1">Each additional view</span>
++            <TextInput value={additional} onChange={(e) => setAdditional(e.target.value.replace(/[^\d]/g, ''))} inputMode="numeric" maxLength={6} leftIcon={<span className="text-sm">{RS}</span>} data-testid="doctor-payout-additional" aria-label="Each additional view" />
++          </label>
++        </fieldset>
++        <div className="text-xs text-slate-600 space-y-1">
++          {valid && (
++            <p data-testid="doctor-payout-example">
++              A 3-view case pays {RS}{Number(first) + 2 * Number(additional)}.
++            </p>
++          )}
++          <p className="text-slate-500">
++            {isCustom
++              ? `Saved tariff. It overrides every centre doctor payout for new sign-offs, including ${formatRates(defaultFirst, defaultAdditional)}.`
++              : `Not saved. This doctor is paid from each centre's doctor payout, or ${formatRates(defaultFirst, defaultAdditional)} where that centre has none. Saving any amount, including ${formatRates(defaultFirst, defaultAdditional)}, stores a personal tariff.`}
++          </p>
++          <p className="text-slate-500">Clear personal tariff is the only reset. New sign-offs only.</p>
++          {!valid && <p className="text-rose-600">Enter whole rupees from 0 to {MAX_RATE}.</p>}
++          {error && <p className="text-rose-600" role="alert">{error}</p>}
++        </div>
++      </form>
++    </Modal>
++  );
++}
+diff -ruN a/components/DoctorDetailsModal.tsx b/components/DoctorDetailsModal.tsx
+--- a/components/DoctorDetailsModal.tsx	2026-11-07 19:21:22.017881050 +0000
++++ b/components/DoctorDetailsModal.tsx	2026-11-07 19:23:19.732691608 +0000
+@@ -130,9 +130,9 @@
+           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+             <div>
+               <div className="mb-1.5 text-[12px] font-semibold text-slate-700">Signature</div>
+-              <div className="flex h-20 w-full items-center justify-center overflow-hidden rounded-lg border border-dashed border-slate-300 bg-white">
++              <div className="flex h-28 w-full items-center justify-center overflow-hidden rounded-lg border border-dashed border-slate-300 bg-white">
+                 {sig ? (
+-                  <img src={sig} alt={`${doctor.fullName} signature`} className="max-h-16 max-w-[90%] object-contain" />
++                  <img src={sig} alt={`${doctor.fullName} signature`} className="max-h-24 max-w-[92%] bg-transparent object-contain" />
+                 ) : (
+                   <span className="text-[12px] text-slate-400">No signature uploaded</span>
+                 )}
+diff -ruN a/components/DoctorSignatureForm.tsx b/components/DoctorSignatureForm.tsx
+--- a/components/DoctorSignatureForm.tsx	2026-11-07 19:21:22.013881133 +0000
++++ b/components/DoctorSignatureForm.tsx	2026-11-07 19:23:18.984694739 +0000
+@@ -298,17 +298,11 @@
+         </p>
+         <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+           <div
+-            className="h-20 w-full sm:w-56 rounded-lg border border-dashed border-slate-300 flex items-center justify-center overflow-hidden"
+-            style={{
+-              backgroundImage:
+-                'linear-gradient(45deg,#f1f5f9 25%,transparent 25%),linear-gradient(-45deg,#f1f5f9 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#f1f5f9 75%),linear-gradient(-45deg,transparent 75%,#f1f5f9 75%)',
+-              backgroundSize: '12px 12px',
+-              backgroundPosition: '0 0,0 6px,6px -6px,-6px 0',
+-              backgroundColor: '#fff',
+-            }}
++            className="flex h-28 w-full items-center justify-center overflow-hidden rounded-lg border border-dashed border-slate-300 bg-white sm:w-72"
++            data-testid="signature-preview-frame"
+           >
+             {sigPreview ? (
+-              <img src={sigPreview} alt="Signature" className="max-h-16 max-w-[90%] object-contain" data-testid="signature-preview" />
++              <img src={sigPreview} alt="Signature" className="max-h-24 max-w-[92%] bg-transparent object-contain" data-testid="signature-preview" />
+             ) : (
+               <span className="text-[12px] text-slate-400">No signature uploaded</span>
+             )}
+@@ -414,7 +408,7 @@
+       <section className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+         <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 mb-2">On the report</div>
+         <div className="text-right text-[12px] text-slate-900" data-testid="signature-block-preview">
+-          {sigPreview ? <img src={sigPreview} alt="" className="inline-block h-10 object-contain mb-1" /> : null}
++          {sigPreview ? <img src={sigPreview} alt="" className="mb-1 inline-block h-16 max-w-[70%] bg-transparent object-contain" /> : null}
+           <div className="font-bold text-[13px]">{doctor.fullName}</div>
+           {degree.trim() ? <div>{degree.trim()}</div> : null}
+           {regNo.trim() ? <div>{formatRegNo(regNo)}</div> : null}
+diff -ruN a/lib/api-client.ts b/lib/api-client.ts
+--- a/lib/api-client.ts	2026-11-07 19:21:22.025880885 +0000
++++ b/lib/api-client.ts	2026-11-07 19:29:39.163438393 +0000
+@@ -946,6 +946,11 @@
+       doctor: { firstStudy: number; additionalStudy: number };
+       isDefault?: boolean;
+       variesByCenter?: boolean;
++      doctorRateSource?: 'default' | 'doctor' | 'unset';
++      default?: {
++        center: { firstStudy: number; additionalStudy: number };
++        doctor: { firstStudy: number; additionalStudy: number };
++      };
+       allowedModalities: string[];
+     }>(`/billing/pricing${centerId ? `?centerId=${encodeURIComponent(centerId)}` : ''}`);
+   },
+@@ -963,6 +968,31 @@
+     });
+   },
  
-         <div className="text-xs text-slate-600 space-y-1">
-           {example && (
-             <p data-testid="pricing-example">
--              A 3-study case: centre {RS}{example.center}, doctor {RS}{example.doctor}.
-+              A 3-view case: centre {RS}{example.center}, doctor {RS}{example.doctor}.
-             </p>
-           )}
-           {defaults && (
-diff -ruN -x node_modules -x .next -x package-lock.json -x tsconfig.tsbuildinfo -x next-env.d.ts a/components/NewXRayReportModal.tsx b/components/NewXRayReportModal.tsx
---- a/components/NewXRayReportModal.tsx	2026-11-07 18:42:39.340009816 +0000
-+++ b/components/NewXRayReportModal.tsx	2026-11-07 18:42:44.980005932 +0000
-@@ -27,11 +27,12 @@
- import { BODY_PARTS_DATA, VIEWS_DATA } from '@/lib/body-parts-data';
- import Autocomplete from '@/components/ui/Autocomplete';
- import { viewsForBodyPart } from '@/lib/body-view-map';
-+import { explicitStudyViews } from '@/lib/study-views';
- import { cleanDr, hasDrPrefix, stripDr, withDr, DR_HINT } from '@/lib/doctor-name';
- 
- /** Payload handed to the page on create (same contract as before, plus the case id the files were stored under). */
- export type NewCasePayload = Omit<XRayReport, 'createdAt'> & {
--  studyUploads?: { bodyPart: string; images: string[]; studyDate?: string; studyTime?: string }[];
-+  studyUploads?: { bodyPart: string; images: string[]; views?: string[]; studyDate?: string; studyTime?: string }[];
- };
- 
- interface NewXRayReportModalProps {
-@@ -734,7 +735,7 @@
-       const done = { n: 0 };
-       if (total > 0) setUploadPct(0);
- 
--      const studyUploads: { bodyPart: string; images: string[]; studyDate?: string; studyTime?: string }[] = [];
-+      const studyUploads: { bodyPart: string; images: string[]; views?: string[]; studyDate?: string; studyTime?: string }[] = [];
-       for (const s of readyStudies) {
-         const paths = await uploadAll(
-           s.views,
-@@ -756,7 +757,13 @@
-           done,
-           total || 1,
-         );
--        studyUploads.push({ bodyPart: resolvedBodyPart(s), images: paths, studyDate: isoToDDMMYYYY(s.studyDate), studyTime: s.studyTime || undefined });
-+        studyUploads.push({
-+          bodyPart: resolvedBodyPart(s),
-+          images: paths,
-+          views: explicitStudyViews(s),
-+          studyDate: isoToDDMMYYYY(s.studyDate),
-+          studyTime: s.studyTime || undefined,
-+        });
-       }
-       const slipPaths = await uploadAll(
-         slips,
-diff -ruN -x node_modules -x .next -x package-lock.json -x tsconfig.tsbuildinfo -x next-env.d.ts a/lib/api-client.ts b/lib/api-client.ts
---- a/lib/api-client.ts	2026-11-07 18:42:39.344009813 +0000
-+++ b/lib/api-client.ts	2026-11-07 18:42:45.612005522 +0000
-@@ -556,7 +556,7 @@
- 
-   async saveReport(
-     report: Partial<XRayReport> & {
--      studyUploads?: { bodyPart: string; images: string[]; studyDate?: string; studyTime?: string }[];
-+      studyUploads?: { bodyPart: string; images: string[]; views?: string[]; studyDate?: string; studyTime?: string }[];
-     },
-   ) {
-     return fetchJson<XRayReport & Partial<PendingApprovalResult>>('/reports', {
-diff -ruN -x node_modules -x .next -x package-lock.json -x tsconfig.tsbuildinfo -x next-env.d.ts a/lib/study-views.test.ts b/lib/study-views.test.ts
---- a/lib/study-views.test.ts	1970-01-01 00:00:00.000000000 +0000
-+++ b/lib/study-views.test.ts	2026-11-07 18:42:43.120007170 +0000
-@@ -0,0 +1,25 @@
++  /** Super Admin: each doctor's payout. No saved tariff means the default. */
++  async getDoctorPricing() {
++    return fetchJson<{
++      default: { firstView: number; additionalView: number };
++      doctors: Array<{
++        doctorId: string;
++        doctorName: string;
++        firstView: number | null;
++        additionalView: number | null;
++        isCustom: boolean;
++        source: string;
++        fallbackFirstView: number;
++        fallbackAdditionalView: number;
++      }>;
++    }>('/billing/doctor-pricing');
++  },
++
++  /** Super Admin: set one doctor's payout for new sign-offs. Matches the default to clear it. */
++  async updateDoctorPricing(doctorId: string, body: { firstView?: number; additionalView?: number; clear?: boolean }) {
++    return fetchJson<{ doctorId: string; doctorName: string; firstView: number; additionalView: number; isCustom: boolean; source: string }>(
++      `/billing/doctor-pricing/${encodeURIComponent(doctorId)}`,
++      { method: 'PUT', body: JSON.stringify(body) },
++    );
++  },
++
+   async getBillingPeriods() {
+     return fetchJson<Array<{
+       period: string;
+diff -ruN a/lib/print-helper.ts b/lib/print-helper.ts
+--- a/lib/print-helper.ts	2026-11-07 19:21:22.025880885 +0000
++++ b/lib/print-helper.ts	2026-11-07 19:23:10.020734571 +0000
+@@ -64,7 +64,7 @@
+  * Every rule is scoped under .rn-sheet.
+  */
+ export const REPORT_SHEET_CSS = `
+-.rn-sheet { font-family: Georgia, "Times New Roman", Times, serif; font-size: 11pt; line-height: 1.55; color: #000; background: #fff; }
++.rn-sheet { font-family: Georgia, "Times New Roman", Times, serif; font-size: 11pt; line-height: 1.35; color: #000; background: #fff; }
+ .rn-sheet * { box-sizing: border-box; }
+ .rn-sheet .letterhead { border-bottom: 2px solid #000; padding-bottom: 10px; margin-bottom: 14px; }
+ .rn-sheet .lh-row { display: flex; gap: 12px; align-items: flex-start; }
+@@ -96,18 +96,19 @@
+ .rn-sheet .rn-note { margin-top: 4px; font-family: system-ui, sans-serif; font-size: 8pt; line-height: 1.4; color: #222; }
+ .rn-sheet h2.study-title { font-family: system-ui, sans-serif; font-size: 12pt; line-height: 1.4; font-weight: 700; text-align: center; text-transform: uppercase; text-decoration: underline; margin: 18px 0 10px; }
+ .rn-sheet h3.sec { font-family: system-ui, sans-serif; font-size: 10pt; line-height: 1.4; font-weight: 700; font-style: normal; text-decoration: none; text-transform: uppercase; letter-spacing: 0.04em; margin: 10px 0 4px; border: none; }
+-.rn-sheet p.body { margin: 0 0 8px; white-space: pre-wrap; word-wrap: break-word; }
++.rn-sheet p.body, .rn-sheet .rn-body-copy { margin: 0 0 0.45em; line-height: 1.35; white-space: pre-wrap; word-wrap: break-word; font-size: inherit; }
++.rn-sheet .rn-body-copy { margin: 0; display: block; width: 100%; }
+ .rn-sheet p.study-intro { margin: 0 0 6px; }
+ .rn-sheet p.findings, .rn-sheet p.impression { border: none !important; outline: none !important; background: transparent !important; padding: 0 !important; }
+ .rn-sheet .study { margin-bottom: 8px; }
+ .rn-sheet .clinical { margin-bottom: 12px; }
+ .rn-sheet .sig-block { margin-top: 28px; font-family: system-ui, sans-serif; }
+ .rn-sheet .sig-row { display: flex; justify-content: flex-end; align-items: flex-end; gap: 14px; }
+-.rn-sheet .sig-inner { text-align: right; min-height: 70px; }
++.rn-sheet .sig-inner { text-align: right; min-height: 28mm; }
+ .rn-sheet .sig-qr { width: 23mm; flex-shrink: 0; text-align: center; font-family: system-ui, sans-serif; font-size: 7pt; line-height: 1.25; color: #444; }
+ .rn-sheet .sig-qr svg { display: block; width: 23mm; height: 23mm; }
+ .rn-sheet .sig-qr-cap { margin-top: 3px; }
+-.rn-sheet .sig-img { height: 52px; max-width: 220px; object-fit: contain; margin-bottom: 4px; display: inline-block; }
++.rn-sheet.rn-page img.sig-img { display: inline-block; height: auto; width: auto; max-height: 26mm; max-width: 68mm; object-fit: contain; object-position: right center; margin: 0 0 2mm 0; background: transparent; vertical-align: bottom; }
+ .rn-sheet .sig-name { font-weight: 700; font-size: 11pt; }
+ .rn-sheet .sig-meta { font-size: 9.5pt; color: #222; }
+ .rn-sheet .disclaimer { margin-top: 22px; padding-top: 10px; border-top: 1px solid #666; font-size: 8.5pt; color: #444; font-style: italic; }
+diff -ruN a/lib/report-layout.test.ts b/lib/report-layout.test.ts
+--- a/lib/report-layout.test.ts	1970-01-01 00:00:00.000000000 +0000
++++ b/lib/report-layout.test.ts	2026-11-07 19:24:38.820466979 +0000
+@@ -0,0 +1,22 @@
 +import assert from 'node:assert/strict';
 +import test from 'node:test';
-+import { explicitStudyViews } from './study-views';
++import { readFileSync } from 'node:fs';
++import { REPORT_SHEET_CSS } from './print-helper';
 +
-+test('one selected view is one view no matter how many files were picked', () => {
-+  const views = explicitStudyViews({ viewList: ['PA'] });
-+  assert.deepEqual(views, ['PA']);
-+  assert.equal(views.length, 1);
++test('report body line height is shared by the sheet and the editor copy', () => {
++  assert.match(REPORT_SHEET_CSS, /\.rn-sheet \{[^}]*line-height: 1\.35/);
++  assert.match(REPORT_SHEET_CSS, /p\.body, \.rn-sheet \.rn-body-copy \{[^}]*line-height: 1\.35/);
 +});
 +
-+test('AP and LATERAL are two views even when a single file was uploaded', () => {
-+  assert.deepEqual(explicitStudyViews({ viewList: ['AP', 'LATERAL'] }), ['AP', 'LATERAL']);
++test('signature keeps aspect ratio and is larger than the old 52px box', () => {
++  assert.match(REPORT_SHEET_CSS, /img\.sig-img \{[^}]*max-height: 26mm/);
++  assert.match(REPORT_SHEET_CSS, /max-width: 68mm/);
++  assert.match(REPORT_SHEET_CSS, /object-fit: contain/);
++  assert.doesNotMatch(REPORT_SHEET_CSS, /sig-img \{[^}]*height: 52px/);
 +});
 +
-+test('AP/LAT is kept as the selected combination label', () => {
-+  assert.deepEqual(explicitStudyViews({ viewList: ['AP/LAT'] }), ['AP/LAT']);
++test('editor stylesheet uses the same body leading as the print sheet', () => {
++  const editor = readFileSync(new URL('../components/A4ReportEditor.tsx', import.meta.url), 'utf8');
++  assert.match(editor, /line-height: 1\.35/);
++  assert.match(editor, /rn-body-copy/);
 +});
-+
-+test('a legacy single view field is sent when the multi-select is empty', () => {
-+  assert.deepEqual(explicitStudyViews({ viewList: [], view: 'AP/LATERAL' }), ['AP/LATERAL']);
-+});
-+
-+test('no selected view sends nothing for the server to parse from the study name', () => {
-+  assert.deepEqual(explicitStudyViews({ viewList: [], view: '  ' }), []);
-+});
-diff -ruN -x node_modules -x .next -x package-lock.json -x tsconfig.tsbuildinfo -x next-env.d.ts a/lib/study-views.ts b/lib/study-views.ts
---- a/lib/study-views.ts	1970-01-01 00:00:00.000000000 +0000
-+++ b/lib/study-views.ts	2026-11-07 18:42:41.608008209 +0000
-@@ -0,0 +1,12 @@
-+/** Explicit projection labels chosen on the upload form.
-+
-+Image files are not views. Billing uses this list, not how many files were uploaded.
-+*/
-+export function explicitStudyViews(study: { viewList?: string[] | null; view?: string | null }): string[] {
-+  const list = Array.isArray(study.viewList)
-+    ? study.viewList.map((v) => String(v || '').trim()).filter(Boolean)
-+    : [];
-+  if (list.length) return list;
-+  const one = String(study.view || '').trim();
-+  return one ? [one] : [];
+diff -ruN a/lib/report-pages.ts b/lib/report-pages.ts
+--- a/lib/report-pages.ts	2026-11-07 19:21:22.025880885 +0000
++++ b/lib/report-pages.ts	2026-11-07 19:23:10.932730319 +0000
+@@ -46,7 +46,7 @@
+ .rn-sheet .rn-foot-last.sig-block { margin-top: 18px; }
+ .rn-page.rn-compact h2.study-title { margin: 8px 0 5px; }
+ .rn-page.rn-compact h3.sec { margin: 5px 0 2px; }
+-.rn-page.rn-compact p.body { margin-bottom: 4px; }
++.rn-page.rn-compact p.body, .rn-page.rn-compact .rn-edit { margin-bottom: 0.25em; }
+ .rn-page.rn-compact .demo { margin-bottom: 8px; }
+ .rn-page.rn-compact .demo td { padding: 4px 7px; }
+ .rn-page.rn-compact .rn-foot-last.sig-block { margin-top: 10px; }
+diff -ruN a/lib/signature-process.ts b/lib/signature-process.ts
+--- a/lib/signature-process.ts	2026-11-07 19:21:22.025880885 +0000
++++ b/lib/signature-process.ts	2026-11-07 19:25:30.740320401 +0000
+@@ -1,7 +1,11 @@
+ /**
+- * Strip paper / photo background from a signature image so it composites cleanly
+- * on reports (transparent PNG). Handles plain signatures and stamp-style uploads
+- * (signature + printed name/degree). Mirrors backend app/signature_image.py.
++ * Prepare a signature for a white report without redrawing the strokes.
++ *
++ * Dark ink on light paper stays dark and the paper becomes transparent.
++ * Light ink on a grey or dark field keeps the same stroke mask, is coloured
++ * dark enough to read, and the field becomes transparent. An image that is
++ * already transparent is left as-is unless the strokes themselves are light.
++ * Too little ink returns the original pixels.
+  */
+ 
+ function lum(r: number, g: number, b: number): number {
+@@ -17,6 +21,98 @@
+   });
+ }
+ 
++function median(values: number[]): number {
++  if (!values.length) return 0;
++  const ordered = [...values].sort((a, b) => a - b);
++  return ordered[Math.floor(ordered.length / 2)];
 +}
-diff -ruN -x node_modules -x .next -x package-lock.json -x tsconfig.tsbuildinfo -x next-env.d.ts a/package.json b/package.json
---- a/package.json	2026-11-07 18:42:39.340009816 +0000
-+++ b/package.json	2026-11-07 18:42:43.596006851 +0000
++
++function corners(w: number, h: number): Array<[number, number, number, number]> {
++  return [
++    [0, 0, Math.min(80, w), Math.min(80, h)],
++    [Math.max(0, w - 80), 0, w, Math.min(80, h)],
++    [0, Math.max(0, h - 80), Math.min(80, w), h],
++    [Math.max(0, w - 80), Math.max(0, h - 80), w, h],
++  ];
++}
++
++function keepComponents(alpha: Uint16Array, w: number, h: number): Uint8Array {
++  const mask = new Uint8Array(w * h);
++  for (let i = 0; i < w * h; i++) mask[i] = alpha[i] >= 36 ? 1 : 0;
++  const visited = new Uint8Array(w * h);
++  const keep = new Uint8Array(w * h);
++  const stack: number[] = [];
++  for (let i = 0; i < w * h; i++) {
++    if (!mask[i] || visited[i]) continue;
++    stack.length = 0;
++    stack.push(i);
++    visited[i] = 1;
++    const comp: number[] = [];
++    while (stack.length) {
++      const cur = stack.pop() as number;
++      comp.push(cur);
++      const cx = cur % w;
++      const cy = (cur / w) | 0;
++      for (let dy = -1; dy <= 1; dy++) {
++        for (let dx = -1; dx <= 1; dx++) {
++          if (!dx && !dy) continue;
++          const nx = cx + dx;
++          const ny = cy + dy;
++          if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
++          const ni = ny * w + nx;
++          if (mask[ni] && !visited[ni]) {
++            visited[ni] = 1;
++            stack.push(ni);
++          }
++        }
++      }
++    }
++    if (comp.length >= 25) for (const c of comp) keep[c] = 1;
++  }
++  return keep;
++}
++
++function cropAndEncode(
++  canvas: HTMLCanvasElement,
++  ctx: CanvasRenderingContext2D,
++  px: Uint8ClampedArray,
++  w: number,
++  h: number,
++  original: HTMLCanvasElement,
++): string {
++  let minx = w;
++  let miny = h;
++  let maxx = 0;
++  let maxy = 0;
++  let count = 0;
++  for (let i = 0; i < w * h; i++) {
++    if (px[i * 4 + 3] < 48) continue;
++    count += 1;
++    const x = i % w;
++    const y = (i / w) | 0;
++    if (x < minx) minx = x;
++    if (y < miny) miny = y;
++    if (x > maxx) maxx = x;
++    if (y > maxy) maxy = y;
++  }
++  const image = ctx.createImageData(w, h);
++  image.data.set(px);
++  ctx.putImageData(image, 0, 0);
++  if (count < 30 || maxx < minx) return original.toDataURL('image/png');
++  const pad = 12;
++  const sx = Math.max(0, minx - pad);
++  const sy = Math.max(0, miny - pad);
++  const sw = Math.min(w, maxx + 1 + pad) - sx;
++  const sh = Math.min(h, maxy + 1 + pad) - sy;
++  const cropped = document.createElement('canvas');
++  cropped.width = sw;
++  cropped.height = sh;
++  const cctx = cropped.getContext('2d');
++  if (!cctx) return canvas.toDataURL('image/png');
++  cctx.drawImage(canvas, sx, sy, sw, sh, 0, 0, sw, sh);
++  return cropped.toDataURL('image/png');
++}
++
+ /** Process a File or data URL → cleaned transparent PNG data URL. */
+ export async function processSignatureImage(input: File | string): Promise<string> {
+   const dataUrl =
+@@ -34,7 +130,6 @@
+   let w = img.naturalWidth || img.width;
+   let h = img.naturalHeight || img.height;
+   if (!w || !h) throw new Error('Invalid signature image');
+-
+   const scale = Math.min(1, maxSide / Math.max(w, h));
+   w = Math.max(1, Math.round(w * scale));
+   h = Math.max(1, Math.round(h * scale));
+@@ -45,45 +140,85 @@
+   const ctx = canvas.getContext('2d', { willReadFrequently: true });
+   if (!ctx) throw new Error('Canvas unavailable');
+   ctx.drawImage(img, 0, 0, w, h);
++  const original = document.createElement('canvas');
++  original.width = w;
++  original.height = h;
++  original.getContext('2d')?.drawImage(canvas, 0, 0);
+   const imageData = ctx.getImageData(0, 0, w, h);
+   const px = imageData.data;
+ 
+-  const samples: Array<[number, number, number]> = [];
+-  const corners: Array<[number, number, number, number]> = [
+-    [0, 0, Math.min(80, w), Math.min(80, h)],
+-    [Math.max(0, w - 80), 0, w, Math.min(80, h)],
+-    [0, Math.max(0, h - 80), Math.min(80, w), h],
+-    [Math.max(0, w - 80), Math.max(0, h - 80), w, h],
+-  ];
+-  for (const [x0, y0, x1, y1] of corners) {
++  let transparent = 0;
++  for (let i = 0; i < w * h; i++) if (px[i * 4 + 3] < 24) transparent += 1;
++  if (transparent >= 0.35 * w * h) {
++    let inkN = 0;
++    let inkLum = 0;
++    for (let i = 0; i < w * h; i++) {
++      if (px[i * 4 + 3] < 40) continue;
++      inkN += 1;
++      inkLum += lum(px[i * 4], px[i * 4 + 1], px[i * 4 + 2]);
++    }
++    if (inkN >= 30) {
++      const mean = inkLum / inkN;
++      const out = new Uint8ClampedArray(px.length);
++      for (let i = 0; i < w * h; i++) {
++        const a = px[i * 4 + 3];
++        const p = i * 4;
++        if (a < 24) continue;
++        if (mean >= 170) {
++          out[p] = 18;
++          out[p + 1] = 18;
++          out[p + 2] = 18;
++          out[p + 3] = a;
++        } else {
++          out[p] = px[p];
++          out[p + 1] = px[p + 1];
++          out[p + 2] = px[p + 2];
++          out[p + 3] = a;
++        }
++      }
++      return cropAndEncode(canvas, ctx, out, w, h, original);
++    }
++  }
++
++  const samples: number[] = [];
++  for (const [x0, y0, x1, y1] of corners(w, h)) {
+     for (let y = y0; y < y1; y += 2) {
+       for (let x = x0; x < x1; x += 2) {
+-        const i = (y * w + x) * 4;
+-        samples.push([px[i], px[i + 1], px[i + 2]]);
++        const p = (y * w + x) * 4;
++        samples.push(lum(px[p], px[p + 1], px[p + 2]));
+       }
+     }
+   }
+-  samples.sort((a, b) => lum(b[0], b[1], b[2]) - lum(a[0], a[1], a[2]));
+-  const cut = Math.max(1, Math.floor(samples.length * 0.5));
+-  let pr = 0;
+-  let pg = 0;
+-  let pb = 0;
+-  for (let s = 0; s < cut; s++) {
+-    pr += samples[s][0];
+-    pg += samples[s][1];
+-    pb += samples[s][2];
+-  }
+-  pr /= cut;
+-  pg /= cut;
+-  pb /= cut;
+-  const paperLum = lum(pr, pg, pb);
+-  const paperBlueBias = Math.max(0, pb - Math.max(pr, pg));
+-
+-  const alpha = new Uint8Array(w * h);
++  const bg = median(samples);
++  const alpha = new Uint16Array(w * h);
+   const rgb = new Uint8ClampedArray(w * h * 3);
+-  for (let y = 0; y < h; y++) {
+-    for (let x = 0; x < w; x++) {
+-      const i = y * w + x;
++
++  if (bg >= 165) {
++    const colours: Array<[number, number, number]> = [];
++    for (const [x0, y0, x1, y1] of corners(w, h)) {
++      for (let y = y0; y < y1; y += 2) {
++        for (let x = x0; x < x1; x += 2) {
++          const p = (y * w + x) * 4;
++          colours.push([px[p], px[p + 1], px[p + 2]]);
++        }
++      }
++    }
++    colours.sort((a, b) => lum(b[0], b[1], b[2]) - lum(a[0], a[1], a[2]));
++    const cut = Math.max(1, Math.floor(colours.length * 0.5));
++    let pr = 0;
++    let pg = 0;
++    let pb = 0;
++    for (let s = 0; s < cut; s++) {
++      pr += colours[s][0];
++      pg += colours[s][1];
++      pb += colours[s][2];
++    }
++    pr /= cut;
++    pg /= cut;
++    pb /= cut;
++    const paperLum = lum(pr, pg, pb);
++    const paperBlueBias = Math.max(0, pb - Math.max(pr, pg));
++    for (let i = 0; i < w * h; i++) {
+       const p = i * 4;
+       const r = px[p];
+       const g = px[p + 1];
+@@ -91,12 +226,10 @@
+       const darkness = paperLum - lum(r, g, b);
+       const dist = Math.hypot(r - pr, g - pg, b - pb);
+       const blueBias = Math.max(0, b - Math.max(r, g) - paperBlueBias);
+-
+       let ink = 0;
+       if (darkness > 14) ink = Math.max(ink, darkness);
+       if (darkness > 12 && dist > 28) ink = Math.max(ink, dist * 0.55);
+       if (darkness > 18 && blueBias > 8) ink = Math.max(ink, blueBias * 1.6 + darkness * 0.3);
+-
+       let aOut = 0;
+       if (ink <= 18) aOut = 0;
+       else if (ink >= 70) aOut = 255;
+@@ -110,88 +243,29 @@
+         alpha[i] = aOut;
+       }
+     }
+-  }
+-
+-  const mask = new Uint8Array(w * h);
+-  for (let i = 0; i < w * h; i++) mask[i] = alpha[i] >= 36 ? 1 : 0;
+-  const visited = new Uint8Array(w * h);
+-  const keep = new Uint8Array(w * h);
+-  const stack: number[] = [];
+-  for (let i = 0; i < w * h; i++) {
+-    if (!mask[i] || visited[i]) continue;
+-    stack.length = 0;
+-    stack.push(i);
+-    visited[i] = 1;
+-    const comp: number[] = [];
+-    while (stack.length) {
+-      const cur = stack.pop()!;
+-      comp.push(cur);
+-      const cx = cur % w;
+-      const cy = (cur / w) | 0;
+-      for (let dy = -1; dy <= 1; dy++) {
+-        for (let dx = -1; dx <= 1; dx++) {
+-          if (!dx && !dy) continue;
+-          const nx = cx + dx;
+-          const ny = cy + dy;
+-          if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+-          const ni = ny * w + nx;
+-          if (mask[ni] && !visited[ni]) {
+-            visited[ni] = 1;
+-            stack.push(ni);
+-          }
+-        }
+-      }
+-    }
+-    if (comp.length >= 25) {
+-      for (const c of comp) keep[c] = 1;
++  } else {
++    for (let i = 0; i < w * h; i++) {
++      const p = i * 4;
++      const lightness = lum(px[p], px[p + 1], px[p + 2]) - bg;
++      if (lightness <= 18) continue;
++      const aOut = lightness >= 70 ? 255 : Math.round(((lightness - 18) / (70 - 18)) * 255);
++      if (aOut < 18) continue;
++      rgb[i * 3] = 18;
++      rgb[i * 3 + 1] = 18;
++      rgb[i * 3 + 2] = 18;
++      alpha[i] = aOut;
+     }
+   }
+ 
+-  let minx = w;
+-  let miny = h;
+-  let maxx = 0;
+-  let maxy = 0;
+-  let inkCount = 0;
++  const keep = keepComponents(alpha, w, h);
++  const out = new Uint8ClampedArray(px.length);
+   for (let i = 0; i < w * h; i++) {
++    if (!keep[i] || !alpha[i]) continue;
+     const p = i * 4;
+-    if (keep[i] && alpha[i]) {
+-      px[p] = rgb[i * 3];
+-      px[p + 1] = rgb[i * 3 + 1];
+-      px[p + 2] = rgb[i * 3 + 2];
+-      px[p + 3] = alpha[i];
+-      inkCount += 1;
+-      // Crop from solid ink only — soft haze must not inflate the box
+-      if (alpha[i] >= 48) {
+-        const x = i % w;
+-        const y = (i / w) | 0;
+-        if (x < minx) minx = x;
+-        if (y < miny) miny = y;
+-        if (x > maxx) maxx = x;
+-        if (y > maxy) maxy = y;
+-      }
+-    } else {
+-      px[p] = 0;
+-      px[p + 1] = 0;
+-      px[p + 2] = 0;
+-      px[p + 3] = 0;
+-    }
+-  }
+-
+-  if (inkCount < 30) {
+-    return canvas.toDataURL('image/png');
++    out[p] = rgb[i * 3];
++    out[p + 1] = rgb[i * 3 + 1];
++    out[p + 2] = rgb[i * 3 + 2];
++    out[p + 3] = alpha[i];
+   }
+-
+-  ctx.putImageData(imageData, 0, 0);
+-  const pad = 12;
+-  const sx = Math.max(0, minx - pad);
+-  const sy = Math.max(0, miny - pad);
+-  const sw = Math.min(w, maxx + 1 + pad) - sx;
+-  const sh = Math.min(h, maxy + 1 + pad) - sy;
+-  const cropped = document.createElement('canvas');
+-  cropped.width = sw;
+-  cropped.height = sh;
+-  const cctx = cropped.getContext('2d');
+-  if (!cctx) return canvas.toDataURL('image/png');
+-  cctx.drawImage(canvas, sx, sy, sw, sh, 0, 0, sw, sh);
+-  return cropped.toDataURL('image/png');
++  return cropAndEncode(canvas, ctx, out, w, h, original);
+ }
+diff -ruN a/package.json b/package.json
+--- a/package.json	2026-11-07 19:21:22.013881133 +0000
++++ b/package.json	2026-11-07 19:24:42.456459963 +0000
 @@ -7,7 +7,7 @@
                      "build":  "next build",
                      "start":  "next start",
                      "lint":  "next lint",
--                    "test":  "tsx --test lib/template-match.test.ts"
-+                    "test":  "tsx --test lib/template-match.test.ts lib/study-views.test.ts"
+-                    "test":  "tsx --test lib/template-match.test.ts lib/study-views.test.ts"
++                    "test":  "tsx --test lib/template-match.test.ts lib/study-views.test.ts lib/report-layout.test.ts"
                  },
      "dependencies":  {
                           "exceljs":  "^4.4.0",

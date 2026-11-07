@@ -76,7 +76,104 @@ def get_pricing(
         center_id = None
     out = pricing.pricing_public_dict(billing_svc.rates_for_center(db, center_id))
     out["variesByCenter"] = db.query(CenterPricingDB).first() is not None
+    # "default" here is the code fallback (30/15), not a claim that every centre pays that.
+    # A doctor with no saved tariff is "unset": a centre card's doctor payout still applies.
+    out["doctorRateSource"] = "unset" if user.role == "DOCTOR" else "default"
+    if user.role == "DOCTOR":
+        personal = billing_svc.explicit_doctor_payout(db, _meta(user).get("doctorId"))
+        if personal:
+            out["doctor"] = {"firstStudy": personal[0], "additionalStudy": personal[1]}
+            out["doctorRateSource"] = "doctor"
+            out["isDefault"] = False
     return out
+
+
+class DoctorPayoutUpdate(BaseModel):
+    """Save a tariff, or clear it. clear=true is the only way to remove a saved tariff."""
+    firstView: Optional[int] = None
+    additionalView: Optional[int] = None
+    clear: bool = False
+
+
+def _doctor_payout_public(db: Session, doc) -> dict:
+    personal = billing_svc.explicit_doctor_payout(db, doc.id)
+    return {
+        "doctorId": doc.id,
+        "doctorName": doc.full_name,
+        "firstView": personal[0] if personal else None,
+        "additionalView": personal[1] if personal else None,
+        "isCustom": personal is not None,
+        "source": "doctor" if personal is not None else "unset",
+        "fallbackFirstView": pricing.DOCTOR_FIRST_STUDY_INR,
+        "fallbackAdditionalView": pricing.DOCTOR_ADDITIONAL_STUDY_INR,
+    }
+
+
+@billing_router.get("/doctor-pricing")
+def list_doctor_pricing(
+    db: Session = Depends(get_db),
+    _user: UserDB = Depends(require_roles("SUPER_ADMIN")),
+):
+    """Super Admin: every doctor's saved payout. No row means unset, not an effective 30/15."""
+    try:
+        from app.models import DoctorDB
+        from app.soft_delete import active_filter
+    except ImportError:
+        from app.models import DoctorDB
+        from app.soft_delete import active_filter
+    docs = active_filter(db.query(DoctorDB), DoctorDB).order_by(DoctorDB.full_name.asc()).all()
+    return {
+        "default": {"firstView": pricing.DOCTOR_FIRST_STUDY_INR, "additionalView": pricing.DOCTOR_ADDITIONAL_STUDY_INR},
+        "doctors": [_doctor_payout_public(db, doc) for doc in docs],
+    }
+
+
+@billing_router.put("/doctor-pricing/{doctor_id}")
+def update_doctor_pricing(
+    doctor_id: str,
+    body: DoctorPayoutUpdate,
+    db: Session = Depends(get_db),
+    user: UserDB = Depends(require_roles("SUPER_ADMIN")),
+):
+    """Super Admin: save one doctor's payout, or clear it.
+
+    Any valid pair, including 30/15 and 0/0, is stored and overrides centre doctor rates
+    on new sign-offs. clear=true is the only reset. Already billed lines stay.
+    """
+    try:
+        from app.models import DoctorDB
+        from app.soft_delete import is_deleted
+    except ImportError:
+        from app.models import DoctorDB
+        from app.soft_delete import is_deleted
+    from sqlalchemy.orm.attributes import flag_modified
+
+    doc = db.query(DoctorDB).filter(DoctorDB.id == doctor_id).first()
+    if not doc or is_deleted(doc):
+        raise HTTPException(status_code=404, detail="Doctor not found")
+    if body.clear and (body.firstView is not None or body.additionalView is not None):
+        raise HTTPException(status_code=422, detail="Clear the tariff on its own, without sending amounts.")
+    meta = dict(doc.metadata_ or {})
+    if body.clear:
+        meta.pop("payoutRates", None)
+    else:
+        if body.firstView is None or body.additionalView is None:
+            raise HTTPException(status_code=422, detail="firstView and additionalView are required.")
+        values = [body.firstView, body.additionalView]
+        if any((not isinstance(v, int)) or isinstance(v, bool) or v < 0 or v > pricing.MAX_RATE_INR for v in values):
+            raise HTTPException(
+                status_code=422,
+                detail=f"Each rate must be a whole number of rupees from 0 to {pricing.MAX_RATE_INR}.",
+            )
+        meta["payoutRates"] = {"firstView": body.firstView, "additionalView": body.additionalView}
+    doc.metadata_ = meta
+    flag_modified(doc, "metadata_")
+    db.commit()
+    billing_svc.logger.info(
+        "Doctor payout changed: doctor=%s by=%s first=%s additional=%s",
+        doctor_id, user.email, body.firstView, body.additionalView,
+    )
+    return _doctor_payout_public(db, doc)
 
 
 class CenterPricingUpdate(BaseModel):
