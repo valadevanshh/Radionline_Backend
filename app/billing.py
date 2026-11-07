@@ -255,7 +255,18 @@ def create_billing_on_sign_off(
     center_id = case.radiology_center_id
     center_name = case.radiology_center_name or center_id
     # This centre's rate card at sign-off time (defaults when it has none).
+    # Centre charge uses the centre card. Doctor payout uses that doctor's tariff
+    # when one is saved, otherwise the centre card's doctor rates, otherwise 30/15.
     rates = rates_for_center(db, center_id)
+    payout_cache = {}
+
+    def _payout_for(doctor_id):
+        key = doctor_id or ""
+        pair = payout_cache.get(key)
+        if pair is None:
+            pair = doctor_payout_pair(db, doctor_id, center_id)
+            payout_cache[key] = pair
+        return pair
 
     # Doctor payout attribution is PER STUDY: each study's line goes to the doctor
     # who signed that study (signed_by, else claimed_by), priced by the study's
@@ -323,10 +334,11 @@ def create_billing_on_sign_off(
 
     for idx, (study, labels) in enumerate(priced, start=1):
         n_views = len(labels)
-        c_amt = sum(rates.center_amount(view_cursor + offset) for offset in range(n_views))
-        d_amt = sum(rates.doctor_amount(view_cursor + offset) for offset in range(n_views))
-        view_cursor += n_views
         doctor_id, doctor_name = _study_doctor(study)
+        pay_first, pay_additional = _payout_for(doctor_id)
+        c_amt = sum(rates.center_amount(view_cursor + offset) for offset in range(n_views))
+        d_amt = sum(_unit_amount(view_cursor + offset, pay_first, pay_additional) for offset in range(n_views))
+        view_cursor += n_views
         doctor_inv = _doctor_inv(doctor_id, doctor_name) if doctor_id else None
         # Line ids are VARCHAR(100). study.id already contains case_id, so long body-part
         # names overflowed (500 on sign, report not saved). Ids that fit stay byte-identical.
@@ -1026,6 +1038,49 @@ def rates_for_center(db: Session, center_id: Optional[str]) -> "pricing.Rates":
         doctor_first=int(row.doctor_first_inr),
         doctor_additional=int(row.doctor_additional_inr),
     )
+
+
+def explicit_doctor_payout(db: Session, doctor_id: Optional[str]) -> Optional[Tuple[int, int]]:
+    """Saved per-doctor tariff, or None when this doctor follows the default / centre card.
+
+    Stored on the doctor row (metadata.payoutRates). Missing or invalid means no override.
+    """
+    if not doctor_id:
+        return None
+    doc = db.query(DoctorDB).filter(DoctorDB.id == str(doctor_id)).first()
+    raw = (doc.metadata_ or {}).get("payoutRates") if doc is not None else None
+    if not isinstance(raw, dict):
+        return None
+    if "firstView" not in raw or "additionalView" not in raw:
+        return None
+    try:
+        first = int(raw["firstView"])
+        additional = int(raw["additionalView"])
+    except (TypeError, ValueError):
+        return None
+    if first < 0 or additional < 0 or first > pricing.MAX_RATE_INR or additional > pricing.MAX_RATE_INR:
+        return None
+    return first, additional
+
+
+def doctor_payout_pair(db: Session, doctor_id: Optional[str], center_id: Optional[str]) -> Tuple[int, int]:
+    """Rupees for (first view, each additional view) on a new sign-off.
+
+    A doctor tariff wins. Otherwise a centre rate card's stored doctor payout wins.
+    Otherwise the code default (30 / 15). Does not read image counts.
+    """
+    personal = explicit_doctor_payout(db, doctor_id)
+    if personal:
+        return personal
+    if center_id:
+        row = db.query(CenterPricingDB).filter(CenterPricingDB.center_id == center_id).first()
+        if row is not None:
+            return int(row.doctor_first_inr), int(row.doctor_additional_inr)
+    return pricing.DOCTOR_FIRST_STUDY_INR, pricing.DOCTOR_ADDITIONAL_STUDY_INR
+
+
+def _unit_amount(index_one_based: int, first: int, additional: int) -> int:
+    return first if index_one_based <= 1 else additional
 
 
 def _reissue_amount(db: Session, case, study_lines, idx: int) -> int:

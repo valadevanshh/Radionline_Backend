@@ -1,25 +1,25 @@
 {
-  "backendBaseline": "6c704539148a1e8a5d0778af56462ce569ff46f7",
-  "frontendBaseline": "9f72dbc732d3ff7b2e7ab19f3876c5b19e214710",
-  "lineEndings": "Patches are LF, matching the git blobs. The attached sanitized tar stores the same source with CRLF; do not apply these patches onto the CRLF tar bytes. Apply them to the Darling git checkouts of the commits above.",
+  "backendBaseline": "526c53a52de78618bac75f494c1a4b35f7907cae",
+  "frontendBaseline": "c5b8ea7a67d1aabba0714c3d5b8fd92dae627507",
+  "contentNote": "Workspace backend tree at ab36b4e matches the archive backend bytes after LF normalization. GitHub master does not contain 526c53a. Apply these patches onto the local Darling checkouts of the baselines above, not onto stale GitHub master and not onto the CRLF tar.",
   "patches": {
     "backend": {
       "file": "integration/radionline-backend.patch",
-      "sha256": "b50147ded9db0286b119047f5f9cf2d4e0d7c50fe59f883efa81032ded5578b8",
-      "bytes": 71940,
-      "apply": "git apply integration/radionline-backend.patch   # from the backend repo at 6c70453"
+      "sha256": "1561423da2e8c0db24bd6347d1c38f64955bf20adb9a93310a5df69d78041a8d",
+      "bytes": 32610,
+      "apply": "git apply radionline-backend.patch"
     },
     "frontend": {
       "file": "integration/radionline-frontend.patch",
-      "sha256": "8d1330a192a02b32d7a63c9479ca9813e7454fbcdb44988be0717efb6f1544ef",
-      "bytes": 11841,
-      "apply": "patch -p1 < integration/radionline-frontend.patch   # from the frontend repo at 9f72dbc"
+      "sha256": "0e2ffb7d6011aa6d04f7fc1d70c95a753a9cbc516f00aea956f20eb79bc8c6c3",
+      "bytes": 34341,
+      "apply": "patch -p1 < radionline-frontend.patch"
     }
   },
-  "notInPatch": [
-    "No schema migration.",
-    "Stored line amounts are not repriced. View-count pricing starts at the next sign-off.",
-    "Paid or locked invoices are not changed when a patient is deleted.",
-    "Prepaid wallet CHARGE rows are not credited."
-  ]
+  "schema": "No new table. Doctor payoutRates lives in doctors.metadata.",
+  "defaults": {
+    "doctorFirstView": 30,
+    "doctorAdditionalView": 15,
+    "centreDoctorRows": "kept as stored"
+  }
 }

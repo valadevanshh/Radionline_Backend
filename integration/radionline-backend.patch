@@ -1,1340 +1,520 @@
 diff --git a/app/billing.py b/app/billing.py
-index cefc113..31a321a 100644
+index 31a321a..43750a2 100644
 --- a/app/billing.py
 +++ b/app/billing.py
-@@ -138,10 +138,16 @@ def invoice_includes_recheck(inv: Optional[InvoiceDB]) -> bool:
-     return bool(inv is not None and (inv.metadata_ or {}).get("includeRecheck"))
- 
- 
-+# Open-invoice lines whose patient case was deleted. Amounts stay on the row.
-+# Paid or locked invoices never use this status; their lines remain the settlement record.
-+EXCLUDED_DELETED = "EXCLUDED_DELETED"
+@@ -255,7 +255,18 @@ def create_billing_on_sign_off(
+     center_id = case.radiology_center_id
+     center_name = case.radiology_center_name or center_id
+     # This centre's rate card at sign-off time (defaults when it has none).
++    # Centre charge uses the centre card. Doctor payout uses that doctor's tariff
++    # when one is saved, otherwise the centre card's doctor rates, otherwise 30/15.
+     rates = rates_for_center(db, center_id)
++    payout_cache = {}
 +
-+
- def counted_lines(inv: Optional[InvoiceDB], lines: List[InvoiceLineItemDB]) -> List[InvoiceLineItemDB]:
-+    live = [li for li in lines if line_item_status(li) != EXCLUDED_DELETED]
-     if not invoice_includes_recheck(inv):
--        return list(lines)
--    return [li for li in lines if line_item_status(li) != CLAWBACK]
-+        return live
-+    return [li for li in live if line_item_status(li) != CLAWBACK]
++    def _payout_for(doctor_id):
++        key = doctor_id or ""
++        pair = payout_cache.get(key)
++        if pair is None:
++            pair = doctor_payout_pair(db, doctor_id, center_id)
++            payout_cache[key] = pair
++        return pair
  
+     # Doctor payout attribution is PER STUDY: each study's line goes to the doctor
+     # who signed that study (signed_by, else claimed_by), priced by the study's
+@@ -323,10 +334,11 @@ def create_billing_on_sign_off(
  
- def recheck_lines(lines: List[InvoiceLineItemDB]) -> List[InvoiceLineItemDB]:
-@@ -186,6 +192,27 @@ def billing_ordered_studies(db: Session, case_id: str) -> List[StudyDB]:
-     return studies
- 
- 
-+def _study_view_labels(study) -> List[str]:
-+    """Explicit views for one study. Image rows are intentionally not read."""
-+    try:
-+        from app.view_billing import billable_view_labels
-+    except ImportError:
-+        from app.view_billing import billable_view_labels
-+    meta = getattr(study, "metadata_", None) or {}
-+    explicit = meta.get("views") if isinstance(meta, dict) else None
-+    return billable_view_labels(
-+        body_part=getattr(study, "body_part", "") or "",
-+        explicit_views=explicit,
-+    )
-+
-+
-+def _priced_description(prefix: str, idx: int, n_studies: int, study, n_views: int) -> str:
-+    text = f"{prefix} {idx}/{n_studies}: {study.body_part} ({study.modality or 'X-Ray'})"
-+    if n_views > 1:
-+        text += f" · {n_views} views"
-+    return text
-+
-+
- def create_billing_on_sign_off(
-     db: Session,
-     *,
-@@ -205,6 +232,13 @@ def create_billing_on_sign_off(
-     if not case:
-         logger.warning("Billing skipped — case %s not found", case_id)
-         return None
-+    try:
-+        from app.soft_delete import is_deleted
-+    except ImportError:
-+        from app.soft_delete import is_deleted
-+    if is_deleted(case):
-+        logger.info("Billing skipped — case %s is deleted", case_id)
-+        return {"skipped": True, "reason": "case_deleted", "caseId": case_id}
- 
-     studies = billing_ordered_studies(db, case_id)
-     if not studies:
-@@ -280,10 +314,18 @@ def create_billing_on_sign_off(
-     doctor_attribution = []
-     doctor_total = 0
-     n = len(studies)
--
--    for idx, study in enumerate(studies, start=1):
--        c_amt = rates.center_amount(idx)
--        d_amt = rates.doctor_amount(idx)
-+    # Price each explicit view in study order. The first view of the case uses
-+    # the first-unit rate; every later view uses the additional rate. One line
-+    # is still written per study so reassign/recheck stay one payout per study.
-+    priced = [(study, _study_view_labels(study)) for study in studies]
-+    total_views = sum(len(labels) for _study, labels in priced)
-+    view_cursor = 1
-+
-+    for idx, (study, labels) in enumerate(priced, start=1):
-+        n_views = len(labels)
-+        c_amt = sum(rates.center_amount(view_cursor + offset) for offset in range(n_views))
-+        d_amt = sum(rates.doctor_amount(view_cursor + offset) for offset in range(n_views))
-+        view_cursor += n_views
-         doctor_id, doctor_name = _study_doctor(study)
+     for idx, (study, labels) in enumerate(priced, start=1):
+         n_views = len(labels)
++        doctor_id, doctor_name = _study_doctor(study)
++        pay_first, pay_additional = _payout_for(doctor_id)
+         c_amt = sum(rates.center_amount(view_cursor + offset) for offset in range(n_views))
+-        d_amt = sum(rates.doctor_amount(view_cursor + offset) for offset in range(n_views))
++        d_amt = sum(_unit_amount(view_cursor + offset, pay_first, pay_additional) for offset in range(n_views))
+         view_cursor += n_views
+-        doctor_id, doctor_name = _study_doctor(study)
          doctor_inv = _doctor_inv(doctor_id, doctor_name) if doctor_id else None
          # Line ids are VARCHAR(100). study.id already contains case_id, so long body-part
-@@ -300,7 +342,7 @@ def create_billing_on_sign_off(
-             study_id=study.id,
-             study_index=idx,
-             service_date=service_date,
--            description=f"Study {idx}/{n}: {study.body_part} ({study.modality or 'X-Ray'})",
-+            description=_priced_description("Study", idx, n, study, n_views),
-             modality=study.modality,
-             body_part=study.body_part,
-             patient_number=case.patient_number,
-@@ -310,7 +352,7 @@ def create_billing_on_sign_off(
-             doctor_id=doctor_id,
-             doctor_name=doctor_name,
-             unit_amount=c_amt,
--            quantity=1,
-+            quantity=n_views,
-             amount=c_amt,
-             currency=pricing.CURRENCY,
-             created_at=ts,
-@@ -329,7 +371,7 @@ def create_billing_on_sign_off(
-                 study_id=study.id,
-                 study_index=idx,
-                 service_date=service_date,
--                description=f"Payout study {idx}/{n}: {study.body_part} ({study.modality or 'X-Ray'})",
-+                description=_priced_description("Payout study", idx, n, study, n_views),
-                 modality=study.modality,
-                 body_part=study.body_part,
-                 patient_number=case.patient_number,
-@@ -339,7 +381,7 @@ def create_billing_on_sign_off(
-                 doctor_id=doctor_id,
-                 doctor_name=doctor_name,
-                 unit_amount=d_amt,
--                quantity=1,
-+                quantity=n_views,
-                 amount=d_amt,
-                 currency=pricing.CURRENCY,
-                 created_at=ts,
-@@ -364,10 +406,11 @@ def create_billing_on_sign_off(
-         "caseId": case_id,
-         "period": period,
-         "studyCount": n,
-+        "viewCount": total_views,
-         "centerInvoiceId": center_inv.id,
-         "doctorInvoiceId": first_doctor_inv.id if first_doctor_inv else None,
-         "doctorInvoiceIds": [inv.id for inv in doctor_invs.values()],
--        "centerTotalAdded": rates.center_total(n),
-+        "centerTotalAdded": rates.center_total(total_views),
-         "rates": rates.as_dict(),
-         "doctorTotalAdded": doctor_total,
-         "centerLineIds": center_lines_created,
-@@ -384,6 +427,12 @@ def lock_billing_period(db: Session, period: str, locked_by: str) -> dict:
-         raise ValueError("period must be YYYY-MM")
- 
-     ts = now_ist_iso()
-+    invoices = db.query(InvoiceDB).filter(InvoiceDB.billing_period == period).all()
-+    # Drop deleted-patient lines while the period is still open, then freeze.
-+    for inv in invoices:
-+        if not inv.locked and (inv.status or "").lower() != "paid":
-+            sync_open_invoice_deletions(db, inv)
-+
-     lock = db.query(BillingPeriodLockDB).filter(BillingPeriodLockDB.period == period).first()
-     if not lock:
-         lock = BillingPeriodLockDB(period=period, locked=True, locked_at=ts, locked_by=locked_by)
-@@ -607,6 +656,174 @@ def line_item_status(li: InvoiceLineItemDB) -> str:
-     return raw or ACTIVE
- 
- 
-+def invoice_amounts_immutable(db: Session, inv: Optional[InvoiceDB]) -> bool:
-+    """Paid or locked money is a settlement record and is not rewritten."""
-+    if inv is None:
-+        return True
-+    if bool(inv.locked) or is_period_locked(db, inv.billing_period):
-+        return True
-+    return (inv.status or "").lower() == "paid"
-+
-+
-+def _invoice_lines(db: Session, invoice_id: str) -> List[InvoiceLineItemDB]:
-+    return db.query(InvoiceLineItemDB).filter(InvoiceLineItemDB.invoice_id == invoice_id).all()
-+
-+
-+def sync_open_invoice_deletions(db: Session, inv: Optional[InvoiceDB]) -> bool:
-+    """On an open invoice, stop counting lines for deleted or missing patient cases.
-+
-+    Rows and their original amounts are kept (status EXCLUDED_DELETED). Paid and
-+    locked invoices are left unchanged. Idempotent.
-+    """
-+    if inv is None or invoice_amounts_immutable(db, inv):
-+        return False
-+    try:
-+        from app.soft_delete import hidden_patient_case_ids
-+    except ImportError:
-+        from app.soft_delete import hidden_patient_case_ids
-+    lines = _invoice_lines(db, inv.id)
-+    hidden = hidden_patient_case_ids(db, [li.case_id for li in lines if li.case_id])
-+    changed = False
-+    note = "Excluded from this open invoice because the patient case was deleted"
-+    for li in lines:
-+        if not li.case_id or li.case_id not in hidden:
-+            continue
-+        if line_item_status(li) == EXCLUDED_DELETED:
-+            continue
-+        prev = (getattr(li, "status_reason", None) or "").strip()
-+        li.status = EXCLUDED_DELETED
-+        li.status_reason = f"{prev} | {note}" if prev else note
-+        changed = True
-+    counted = sum(int(li.amount or 0) for li in counted_lines(inv, lines))
-+    if int(inv.total_amount or 0) != counted:
-+        inv.total_amount = counted
-+        inv.updated_at = now_ist_iso()
-+        changed = True
-+    if changed:
-+        db.flush()
-+    return changed
-+
-+
-+def exclude_case_from_open_invoices(db: Session, case_id: str) -> List[str]:
-+    """Apply deletion exclusion to every open invoice that mentions this case."""
-+    if not case_id:
-+        return []
-+    inv_ids = {
-+        row[0]
-+        for row in db.query(InvoiceLineItemDB.invoice_id)
-+        .filter(InvoiceLineItemDB.case_id == case_id)
-+        .all()
-+    }
-+    changed = []
-+    for inv_id in inv_ids:
-+        inv = db.query(InvoiceDB).filter(InvoiceDB.id == inv_id).first()
-+        if inv and sync_open_invoice_deletions(db, inv):
-+            changed.append(inv.id)
-+    return changed
-+
-+
-+def preview_open_invoice_deletion_adjustments(db: Session) -> List[dict]:
-+    """Read-only. What an open-invoice read would exclude, and what paid/locked rows keep.
-+
-+    Does not mark lines or change totals. Does not reprice stored amounts.
-+    """
-+    try:
-+        from app.soft_delete import hidden_patient_case_ids
-+    except ImportError:
-+        from app.soft_delete import hidden_patient_case_ids
-+    preview = []
-+    for inv in db.query(InvoiceDB).order_by(InvoiceDB.billing_period.asc(), InvoiceDB.id.asc()).all():
-+        lines = _invoice_lines(db, inv.id)
-+        hidden = hidden_patient_case_ids(db, [li.case_id for li in lines if li.case_id])
-+        affected = [
-+            li for li in lines
-+            if li.case_id in hidden and line_item_status(li) != EXCLUDED_DELETED
-+        ]
-+        if not affected:
-+            continue
-+        immutable = invoice_amounts_immutable(db, inv)
-+        drop_amount = sum(int(li.amount or 0) for li in affected)
-+        if immutable:
-+            action = "preserve"
-+            resulting = int(inv.total_amount or 0)
-+        else:
-+            action = "exclude_on_read"
-+            pretend = [
-+                li for li in lines
-+                if li not in affected and line_item_status(li) != EXCLUDED_DELETED
-+            ]
-+            resulting = sum(int(li.amount or 0) for li in counted_lines(inv, pretend))
-+        preview.append({
-+            "invoiceId": inv.id,
-+            "partyType": inv.party_type,
-+            "partyId": inv.party_id,
-+            "billingPeriod": inv.billing_period,
-+            "storedStatus": inv.status,
-+            "locked": bool(inv.locked),
-+            "action": action,
-+            "storedTotal": int(inv.total_amount or 0),
-+            "resultingTotal": resulting,
-+            "excludedAmount": 0 if immutable else drop_amount,
-+            "lines": [
-+                {
-+                    "lineId": li.id,
-+                    "caseId": li.case_id,
-+                    "amount": int(li.amount or 0),
-+                    "status": line_item_status(li),
-+                    "bodyPart": li.body_part,
-+                }
-+                for li in affected
-+            ],
-+        })
-+    return preview
-+
-+
-+def preview_view_count_deltas(db: Session) -> List[dict]:
-+    """Read-only comparison of stored line amounts with today's view-count pricing.
-+
-+    Nothing is written. Already billed lines keep the amount they were signed at.
-+    """
-+    out = []
-+    for inv in db.query(InvoiceDB).order_by(InvoiceDB.id.asc()).all():
-+        if invoice_amounts_immutable(db, inv):
-+            continue
-+        lines = [
-+            li for li in _invoice_lines(db, inv.id)
-+            if line_item_status(li) == ACTIVE and int(li.amount or 0) > 0 and li.case_id
-+        ]
-+        by_case = {}
-+        for li in lines:
-+            by_case.setdefault(li.case_id, []).append(li)
-+        for case_id, case_lines in by_case.items():
-+            case = db.query(CaseDB).filter(CaseDB.id == case_id).first()
-+            if case is None or getattr(case, "deleted_at", None):
-+                continue
-+            studies = billing_ordered_studies(db, case_id)
-+            rates = rates_for_center(db, case.radiology_center_id)
-+            amount_for = rates.center_amount if inv.party_type == "center" else rates.doctor_amount
-+            cursor = 1
-+            expected = {}
-+            for study in studies:
-+                n_views = len(_study_view_labels(study))
-+                expected[study.id] = sum(amount_for(cursor + offset) for offset in range(n_views))
-+                cursor += n_views
-+            for li in case_lines:
-+                exp = expected.get(li.study_id)
-+                if exp is None or int(li.amount or 0) == int(exp):
-+                    continue
-+                out.append({
-+                    "invoiceId": inv.id,
-+                    "partyType": inv.party_type,
-+                    "lineId": li.id,
-+                    "caseId": case_id,
-+                    "bodyPart": li.body_part,
-+                    "storedAmount": int(li.amount or 0),
-+                    "hypotheticalAmount": int(exp),
-+                    "applied": False,
-+                })
-+    return out
-+
-+
- def _doctor_lines_for_case(db: Session, case_id: str) -> List[InvoiceLineItemDB]:
-     return (
-         db.query(InvoiceLineItemDB)
-@@ -928,6 +1145,14 @@ def ensure_doctor_payout_for_signer(
-         if c_line and not doctor_inv.linked_invoice_id:
-             doctor_inv.linked_invoice_id = c_line.invoice_id
-         amt = _reissue_amount(db, case, study_lines, idx)
-+        prior = sorted(
-+            (li for li in study_lines
-+             if int(li.amount or 0) > 0 and not getattr(li, "offsets_line_item_id", None)),
-+            key=lambda li: li.created_at or "",
-+        )
-+        # Keep the original view quantity. The rupee amount is still the amount
-+        # that original payout was billed at (_reissue_amount).
-+        qty = int(prior[0].quantity or 1) if prior else 1
-         line_id = _bounded_id(f"ili-d-{case_id}-{idx}-r{stamp}", "ili-d")
-         db.add(
-             InvoiceLineItemDB(
-@@ -941,7 +1166,7 @@ def ensure_doctor_payout_for_signer(
-                 service_date=(c_line.service_date if c_line else None)
-                 or (case.study_date if case else None)
-                 or now_ist().strftime("%d-%m-%Y"),
--                description=f"Payout study {idx}/{n}: {study.body_part} ({study.modality or 'X-Ray'})",
-+                description=_priced_description("Payout study", idx, n, study, qty),
-                 modality=study.modality,
-                 body_part=study.body_part,
-                 patient_number=case.patient_number if case else None,
-@@ -951,7 +1176,7 @@ def ensure_doctor_payout_for_signer(
-                 doctor_id=doctor_id,
-                 doctor_name=doctor_name,
-                 unit_amount=amt,
--                quantity=1,
-+                quantity=qty,
-                 amount=amt,
-                 currency=pricing.CURRENCY,
-                 created_at=ts,
-@@ -1004,6 +1229,8 @@ def revenue_summary(db: Session, months: int = 6) -> dict:
- 
-     def summarize_period(period: str) -> dict:
-         invoices = db.query(InvoiceDB).filter(InvoiceDB.billing_period == period).all()
-+        for inv in invoices:
-+            sync_open_invoice_deletions(db, inv)
-         center_billing = 0
-         doctor_payouts = 0
-         center_paid = 0
-diff --git a/app/routers/case_thread.py b/app/routers/case_thread.py
-index eb3ccb4..34e5dc5 100644
---- a/app/routers/case_thread.py
-+++ b/app/routers/case_thread.py
-@@ -125,10 +125,20 @@ def _comment_to_schema(row: ReportCommentDB) -> dict:
-     }
- 
- 
-+def _visible_case(case: CaseDB) -> CaseDB:
-+    try:
-+        from app.soft_delete import is_deleted
-+    except ImportError:
-+        from app.soft_delete import is_deleted
-+    if is_deleted(case):
-+        raise HTTPException(status_code=404, detail="Case/report not found")
-+    return case
-+
-+
- def _resolve_case(db: Session, report_id: str) -> CaseDB:
-     case = db.query(CaseDB).filter(CaseDB.id == report_id).first()
-     if case:
--        return case
-+        return _visible_case(case)
-     study = (
-         db.query(StudyDB)
-         .filter((StudyDB.id == report_id) | (StudyDB.case_id == report_id))
-@@ -137,7 +147,7 @@ def _resolve_case(db: Session, report_id: str) -> CaseDB:
-     if study:
-         case = db.query(CaseDB).filter(CaseDB.id == study.case_id).first()
-         if case:
--            return case
-+            return _visible_case(case)
-     raise HTTPException(status_code=404, detail="Case/report not found")
- 
- 
-diff --git a/app/routers/invoices.py b/app/routers/invoices.py
-index 7221acf..c565005 100644
---- a/app/routers/invoices.py
-+++ b/app/routers/invoices.py
-@@ -167,7 +167,9 @@ def get_revenue_summary(
-     _user: UserDB = Depends(require_roles("SUPER_ADMIN")),
- ):
-     """Super Admin only: monthly revenue from Priority 3 invoice tables (real DB sums)."""
--    return billing_svc.revenue_summary(db, months=months)
-+    result = billing_svc.revenue_summary(db, months=months)
-+    db.commit()
-+    return result
- 
- 
- @billing_router.get("/periods")
-@@ -274,6 +276,8 @@ def list_invoices(
-         q = q.filter(InvoiceDB.billing_period == period)
- 
-     invoices = q.order_by(InvoiceDB.billing_period.desc(), InvoiceDB.party_name.asc()).all()
-+    if _sync_deleted_patients(db, invoices):
-+        db.commit()
-     result = [billing_svc.invoice_to_dict(inv) for inv in invoices]
-     if status_filter:
-         sf = status_filter.lower()
-@@ -291,6 +295,9 @@ def get_invoice(
-     if not inv:
-         raise HTTPException(status_code=404, detail="Invoice not found")
-     _authorize_invoice_read(user, inv, db)
-+    if _sync_deleted_patients(db, [inv]):
-+        db.commit()
-+        db.refresh(inv)
- 
-     lines = (
-         db.query(InvoiceLineItemDB)
-@@ -354,6 +361,15 @@ def update_invoice_status(
-         raise HTTPException(status_code=400, detail=str(e))
- 
- 
-+def _sync_deleted_patients(db: Session, invoices: List[InvoiceDB]) -> bool:
-+    """Persist open-invoice deletion adjustments. Paid and locked invoices are skipped."""
-+    changed = False
-+    for inv in invoices:
-+        if billing_svc.sync_open_invoice_deletions(db, inv):
-+            changed = True
-+    return changed
-+
-+
- def _authorize_invoice_read(user: UserDB, inv: InvoiceDB, db: Optional[Session] = None) -> None:
-     meta = _meta(user)
-     if user.role == "SUPER_ADMIN":
-diff --git a/app/routers/notifications.py b/app/routers/notifications.py
-index 61c5e58..1a30f94 100644
---- a/app/routers/notifications.py
-+++ b/app/routers/notifications.py
-@@ -30,8 +30,20 @@ def list_my_notifications(
-     current_user: UserDB = Depends(get_current_user),
- ):
-     q = db.query(UserNotificationDB).filter(UserNotificationDB.user_id == current_user.id)
--    rows = q.order_by(UserNotificationDB.id.desc()).limit(LIST_LIMIT).all()
--    unread = q.filter(UserNotificationDB.read_at.is_(None)).count()
-+    if current_user.role == "DOCTOR":
-+        # Over-fetch so deleted-patient notices don't crowd out other recent items.
-+        rows = q.order_by(UserNotificationDB.id.desc()).limit(LIST_LIMIT * 4).all()
-+        try:
-+            from app.soft_delete import hidden_patient_case_ids
-+        except ImportError:
-+            from app.soft_delete import hidden_patient_case_ids
-+        hidden = hidden_patient_case_ids(db, [r.case_id for r in rows if r.case_id])
-+        rows = [r for r in rows if not r.case_id or r.case_id not in hidden]
-+        unread = sum(1 for r in rows if not r.read_at)
-+        rows = rows[:LIST_LIMIT]
-+    else:
-+        rows = q.order_by(UserNotificationDB.id.desc()).limit(LIST_LIMIT).all()
-+        unread = q.filter(UserNotificationDB.read_at.is_(None)).count()
-     return {"items": [to_schema(r) for r in rows], "unread": unread}
- 
- 
-diff --git a/app/routers/reports.py b/app/routers/reports.py
-index e9fb819..05960ad 100644
---- a/app/routers/reports.py
-+++ b/app/routers/reports.py
-@@ -370,11 +370,15 @@ def get_my_work(
- 
-     cases = db.query(CaseDB).filter(CaseDB.id.in_(list(by_case.keys()))).all()
-     case_map = {c.id: c for c in cases}
-+    try:
-+        from app.soft_delete import is_deleted
-+    except ImportError:
-+        from app.soft_delete import is_deleted
- 
-     items_meta = []
-     for case_id, study_list in by_case.items():
-         case = case_map.get(case_id)
--        if not case:
-+        if not case or is_deleted(case):
-             continue
-         if center_id and case.radiology_center_id != center_id:
-             continue
-@@ -693,9 +697,21 @@ async def save_report_core(report_in: ReportCreate, db: Session):
- 
-     # Prefer per-study uploads (body part + its views). Fall back to flat uploadedImages.
-     raw_study_uploads = getattr(report_in, "studyUploads", None) or []
--    study_image_map: List[Tuple[str, List]] = []
-+    study_image_map: List[Tuple[str, List, Optional[List[str]]]] = []
-     study_date_map: dict = {}
-     study_time_map: dict = {}
-+
-+    def _clean_view_labels(raw) -> Optional[List[str]]:
-+        if not raw:
-+            return None
-+        out: List[str] = []
-+        for item in raw:
-+            if isinstance(item, str) and item.strip():
-+                out.append(item.strip()[:80])
-+            if len(out) >= 30:
-+                break
-+        return out or None
-+
-     if raw_study_uploads:
-         for su in raw_study_uploads:
-             bp = (getattr(su, "bodyPart", None) or "").strip()
-@@ -707,7 +723,7 @@ async def save_report_core(report_in: ReportCreate, db: Session):
-                 entity_id=rep_id,
-                 subfolder="uploads",
-             )
--            study_image_map.append((bp, imgs))
-+            study_image_map.append((bp, imgs, _clean_view_labels(getattr(su, "views", None))))
-             st_raw = (getattr(su, "studyTime", None) or "").strip()
-             if st_raw:
-                 import re as _re
-@@ -727,9 +743,9 @@ async def save_report_core(report_in: ReportCreate, db: Session):
-         # cases.study_date = first study's date (back-compat for lists, billing, filters)
-         if study_image_map and study_date_map.get(study_image_map[0][0]):
-             report_in.studyDate = study_date_map[study_image_map[0][0]]
--        body_parts_resolved = [bp for bp, _ in study_image_map] or (report_in.bodyParts or ["CHEST PA/AP"])
-+        body_parts_resolved = [bp for bp, _imgs, _views in study_image_map] or (report_in.bodyParts or ["CHEST PA/AP"])
-         uploaded_images = []
--        for _, imgs in study_image_map:
-+        for _bp, imgs, _views in study_image_map:
-             for u in imgs:
-                 if u not in uploaded_images:
-                     uploaded_images.append(u)
-@@ -742,7 +758,7 @@ async def save_report_core(report_in: ReportCreate, db: Session):
-             entity_id=rep_id,
-             subfolder="uploads",
-         )
--        study_image_map = [(bp, list(uploaded_images)) for bp in body_parts_resolved]
-+        study_image_map = [(bp, list(uploaded_images), None) for bp in body_parts_resolved]
- 
-     clinical_history_images = file_storage.materialize_media_list(
-         getattr(report_in, "clinicalHistoryImages", None),
-@@ -856,7 +872,7 @@ async def save_report_core(report_in: ReportCreate, db: Session):
-         else None
+         # names overflowed (500 on sign, report not saved). Ids that fit stay byte-identical.
+@@ -1028,6 +1040,49 @@ def rates_for_center(db: Session, center_id: Optional[str]) -> "pricing.Rates":
      )
  
--    for position, (bp, study_imgs) in enumerate(study_image_map, start=1):
-+    for position, (bp, study_imgs, view_labels) in enumerate(study_image_map, start=1):
-         sanitized_bp = bp.replace('/', '-').replace(' ', '-').lower()
-         study_id = f"{rep_id}-{sanitized_bp}"
-         if len(study_id) > 100:
-@@ -888,6 +904,7 @@ async def save_report_core(report_in: ReportCreate, db: Session):
-                 created_at=created_at,
-                 metadata_={
-                     **meta_payload,
-+                    **({"views": view_labels} if view_labels else {}),
-                     **({"studyDate": study_date_map[bp]} if study_date_map.get(bp) else {}),
-                     **({"studyTime": study_time_map[bp]} if study_time_map.get(bp) else {}),
-                 },
-@@ -920,12 +937,14 @@ async def save_report_core(report_in: ReportCreate, db: Session):
+ 
++def explicit_doctor_payout(db: Session, doctor_id: Optional[str]) -> Optional[Tuple[int, int]]:
++    """Saved per-doctor tariff, or None when this doctor follows the default / centre card.
++
++    Stored on the doctor row (metadata.payoutRates). Missing or invalid means no override.
++    """
++    if not doctor_id:
++        return None
++    doc = db.query(DoctorDB).filter(DoctorDB.id == str(doctor_id)).first()
++    raw = (doc.metadata_ or {}).get("payoutRates") if doc is not None else None
++    if not isinstance(raw, dict):
++        return None
++    if "firstView" not in raw or "additionalView" not in raw:
++        return None
++    try:
++        first = int(raw["firstView"])
++        additional = int(raw["additionalView"])
++    except (TypeError, ValueError):
++        return None
++    if first < 0 or additional < 0 or first > pricing.MAX_RATE_INR or additional > pricing.MAX_RATE_INR:
++        return None
++    return first, additional
++
++
++def doctor_payout_pair(db: Session, doctor_id: Optional[str], center_id: Optional[str]) -> Tuple[int, int]:
++    """Rupees for (first view, each additional view) on a new sign-off.
++
++    A doctor tariff wins. Otherwise a centre rate card's stored doctor payout wins.
++    Otherwise the code default (30 / 15). Does not read image counts.
++    """
++    personal = explicit_doctor_payout(db, doctor_id)
++    if personal:
++        return personal
++    if center_id:
++        row = db.query(CenterPricingDB).filter(CenterPricingDB.center_id == center_id).first()
++        if row is not None:
++            return int(row.doctor_first_inr), int(row.doctor_additional_inr)
++    return pricing.DOCTOR_FIRST_STUDY_INR, pricing.DOCTOR_ADDITIONAL_STUDY_INR
++
++
++def _unit_amount(index_one_based: int, first: int, additional: int) -> int:
++    return first if index_one_based <= 1 else additional
++
++
+ def _reissue_amount(db: Session, case, study_lines, idx: int) -> int:
+     """Payout for a re-signed (reassigned) study: the amount the study's original
+     payout was billed at, so a case billed before a rate change stays on the old
+diff --git a/app/pricing.py b/app/pricing.py
+index 67dd57f..854d47a 100644
+--- a/app/pricing.py
++++ b/app/pricing.py
+@@ -11,9 +11,11 @@ from dataclasses import dataclass
+ CENTER_FIRST_STUDY_INR = 30
+ CENTER_ADDITIONAL_STUDY_INR = 15
+ 
+-# Doctor payouts (radiologist is paid)
+-DOCTOR_FIRST_STUDY_INR = 20
+-DOCTOR_ADDITIONAL_STUDY_INR = 10
++# Doctor payouts (radiologist is paid) when that doctor has no saved tariff and the
++# centre rate card does not store its own doctor payout. A saved doctor tariff, or
++# a centre card's doctor rates, is used instead. New sign-offs only.
++DOCTOR_FIRST_STUDY_INR = 30
++DOCTOR_ADDITIONAL_STUDY_INR = 15
+ 
+ CURRENCY = "INR"
+ 
+diff --git a/app/routers/invoices.py b/app/routers/invoices.py
+index c565005..5780333 100644
+--- a/app/routers/invoices.py
++++ b/app/routers/invoices.py
+@@ -76,9 +76,97 @@ def get_pricing(
+         center_id = None
+     out = pricing.pricing_public_dict(billing_svc.rates_for_center(db, center_id))
+     out["variesByCenter"] = db.query(CenterPricingDB).first() is not None
++    out["doctorRateSource"] = "default"
++    if user.role == "DOCTOR":
++        personal = billing_svc.explicit_doctor_payout(db, _meta(user).get("doctorId"))
++        if personal:
++            out["doctor"] = {"firstStudy": personal[0], "additionalStudy": personal[1]}
++            out["doctorRateSource"] = "doctor"
++            out["isDefault"] = False
+     return out
+ 
+ 
++class DoctorPayoutUpdate(BaseModel):
++    firstView: int
++    additionalView: int
++
++
++def _doctor_payout_public(db: Session, doc) -> dict:
++    personal = billing_svc.explicit_doctor_payout(db, doc.id)
++    first, additional = personal or (pricing.DOCTOR_FIRST_STUDY_INR, pricing.DOCTOR_ADDITIONAL_STUDY_INR)
++    return {
++        "doctorId": doc.id,
++        "doctorName": doc.full_name,
++        "firstView": first,
++        "additionalView": additional,
++        "isCustom": personal is not None,
++        "source": "doctor" if personal is not None else "default",
++    }
++
++
++@billing_router.get("/doctor-pricing")
++def list_doctor_pricing(
++    db: Session = Depends(get_db),
++    _user: UserDB = Depends(require_roles("SUPER_ADMIN")),
++):
++    """Super Admin: every doctor's payout. No saved tariff means the default 30/15."""
++    try:
++        from app.models import DoctorDB
++        from app.soft_delete import active_filter
++    except ImportError:
++        from app.models import DoctorDB
++        from app.soft_delete import active_filter
++    docs = active_filter(db.query(DoctorDB), DoctorDB).order_by(DoctorDB.full_name.asc()).all()
++    return {
++        "default": {"firstView": pricing.DOCTOR_FIRST_STUDY_INR, "additionalView": pricing.DOCTOR_ADDITIONAL_STUDY_INR},
++        "doctors": [_doctor_payout_public(db, doc) for doc in docs],
++    }
++
++
++@billing_router.put("/doctor-pricing/{doctor_id}")
++def update_doctor_pricing(
++    doctor_id: str,
++    body: DoctorPayoutUpdate,
++    db: Session = Depends(get_db),
++    user: UserDB = Depends(require_roles("SUPER_ADMIN")),
++):
++    """Super Admin: set one doctor's payout for new sign-offs.
++
++    Values equal to the current default remove the override. Already billed lines stay.
++    Managers are not given this route; it matches centre rate cards (Super Admin only).
++    """
++    try:
++        from app.models import DoctorDB
++        from app.soft_delete import is_deleted
++    except ImportError:
++        from app.models import DoctorDB
++        from app.soft_delete import is_deleted
++    from sqlalchemy.orm.attributes import flag_modified
++
++    doc = db.query(DoctorDB).filter(DoctorDB.id == doctor_id).first()
++    if not doc or is_deleted(doc):
++        raise HTTPException(status_code=404, detail="Doctor not found")
++    values = [body.firstView, body.additionalView]
++    if any((not isinstance(v, int)) or v < 0 or v > pricing.MAX_RATE_INR for v in values):
++        raise HTTPException(
++            status_code=422,
++            detail=f"Each rate must be a whole number of rupees from 0 to {pricing.MAX_RATE_INR}.",
++        )
++    meta = dict(doc.metadata_ or {})
++    if values == [pricing.DOCTOR_FIRST_STUDY_INR, pricing.DOCTOR_ADDITIONAL_STUDY_INR]:
++        meta.pop("payoutRates", None)
++    else:
++        meta["payoutRates"] = {"firstView": body.firstView, "additionalView": body.additionalView}
++    doc.metadata_ = meta
++    flag_modified(doc, "metadata_")
++    db.commit()
++    billing_svc.logger.info(
++        "Doctor payout changed: doctor=%s by=%s first=%s additional=%s",
++        doctor_id, user.email, body.firstView, body.additionalView,
++    )
++    return _doctor_payout_public(db, doc)
++
++
+ class CenterPricingUpdate(BaseModel):
+     centerFirstStudy: int
+     centerAdditionalStudy: int
+diff --git a/app/signature_image.py b/app/signature_image.py
+index 0946349..1b5cb4d 100644
+--- a/app/signature_image.py
++++ b/app/signature_image.py
+@@ -24,78 +24,46 @@ def _lum(r: float, g: float, b: float) -> float:
+     return 0.299 * r + 0.587 * g + 0.114 * b
+ 
+ 
+-def remove_signature_background(raw: bytes) -> bytes:
+-    """Return a cropped transparent PNG. Raises ValueError if image cannot be read."""
+-    try:
+-        from PIL import Image
+-    except ImportError as e:
+-        raise RuntimeError("Pillow is required for signature background removal") from e
++def _median(values: list) -> float:
++    if not values:
++        return 0.0
++    ordered = sorted(values)
++    return float(ordered[len(ordered) // 2])
+ 
+-    img = Image.open(io.BytesIO(raw)).convert("RGBA")
+-    max_side = 1600
+-    if max(img.size) > max_side:
+-        img.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+ 
++def _crop_ink(img, pixels, alpha_floor: int = 48):
++    """Crop to opaque-enough ink. Returns None when there is not enough ink."""
+     w, h = img.size
+-    px = list(img.getdata())
++    minx, miny, maxx, maxy = w, h, 0, 0
++    count = 0
++    for i, (_r, _g, _b, a) in enumerate(pixels):
++        if a < alpha_floor:
++            continue
++        count += 1
++        x, y = i % w, i // w
++        minx = min(minx, x)
++        miny = min(miny, y)
++        maxx = max(maxx, x)
++        maxy = max(maxy, y)
++    if count < 30 or maxx < minx or maxy < miny:
++        return None
++    pad = 12
++    box = (max(0, minx - pad), max(0, miny - pad), min(w, maxx + 1 + pad), min(h, maxy + 1 + pad))
++    out = img.copy()
++    out.putdata(pixels)
++    return out.crop(box)
+ 
+-    # Paper colour: brightest samples from corners (handles tinted indoor lighting)
+-    samples = []
+-    for x0, y0, x1, y1 in (
+-        (0, 0, min(80, w), min(80, h)),
+-        (max(0, w - 80), 0, w, min(80, h)),
+-        (0, max(0, h - 80), min(80, w), h),
+-        (max(0, w - 80), max(0, h - 80), w, h),
+-    ):
+-        for y in range(y0, y1, 2):
+-            for x in range(x0, x1, 2):
+-                r, g, b, _a = px[y * w + x]
+-                samples.append((r, g, b))
+-    if not samples:
+-        raise ValueError("empty signature image")
+-    samples.sort(key=lambda t: _lum(*t), reverse=True)
+-    cut = max(1, int(len(samples) * 0.5))
+-    pr = sum(s[0] for s in samples[:cut]) / cut
+-    pg = sum(s[1] for s in samples[:cut]) / cut
+-    pb = sum(s[2] for s in samples[:cut]) / cut
+-    paper_lum = _lum(pr, pg, pb)
+-    # Indoor photos often have a blue/purple cast on the paper — subtract it
+-    # so we do not treat the whole page as "blue ink".
+-    paper_blue_bias = max(0.0, pb - max(pr, pg))
+-
+-    alpha = [0] * (w * h)
+-    rgb = [(0, 0, 0)] * (w * h)
+-    for i, (r, g, b, _a) in enumerate(px):
+-        darkness = paper_lum - _lum(r, g, b)
+-        dist = ((r - pr) ** 2 + (g - pg) ** 2 + (b - pb) ** 2) ** 0.5
+-        blue_bias = max(0.0, b - max(r, g) - paper_blue_bias)
+-
+-        # Ink / printed text is darker or chromatically different from paper.
+-        # Require real darkness for chroma shortcuts so tinted paper stays transparent.
+-        ink = 0.0
+-        if darkness > 14:
+-            ink = max(ink, darkness)
+-        if darkness > 12 and dist > 28:
+-            ink = max(ink, dist * 0.55)
+-        if darkness > 18 and blue_bias > 8:
+-            ink = max(ink, blue_bias * 1.6 + darkness * 0.3)
+-
+-        if ink <= 18:
+-            a_out = 0
+-        elif ink >= 70:
+-            a_out = 255
+-        else:
+-            a_out = int(round((ink - 18) / (70 - 18) * 255))
+-        if a_out < 18:
+-            a_out = 0
+-        if a_out:
+-            # Slight darken for clear print on white letterheads
+-            factor = 0.78 if darkness < 80 else 0.72
+-            rgb[i] = (max(0, int(r * factor)), max(0, int(g * factor)), max(0, int(b * factor)))
+-            alpha[i] = a_out
+ 
+-    # Drop speckles / show-through that are not part of a large ink component
+-    mask = [1 if a >= 36 else 0 for a in alpha]
++def _png_bytes(img) -> bytes:
++    from PIL import Image
++
++    buf = io.BytesIO()
++    img.save(buf, format="PNG", optimize=True)
++    return buf.getvalue()
++
++
++def _keep_components(alpha, w, h, threshold: int = 36, min_size: int = 25):
++    mask = [1 if a >= threshold else 0 for a in alpha]
+     visited = [False] * (w * h)
+     keep = [False] * (w * h)
+     for i in range(w * h):
+@@ -118,44 +86,139 @@ def remove_signature_background(raw: bytes) -> bytes:
+                         if mask[ni] and not visited[ni]:
+                             visited[ni] = True
+                             stack.append(ni)
+-        # Printed letters + signature strokes are large; dust is small
+-        if len(comp) >= 25:
++        if len(comp) >= min_size:
+             for c in comp:
+                 keep[c] = True
++    return keep
++
++
++def _finish(raw: bytes, img, pixels) -> bytes:
++    cropped = _crop_ink(img, pixels)
++    if cropped is None:
++        logger.warning("Signature background removal found little ink; keeping original")
++        return _png_bytes(img)
++    return _png_bytes(cropped)
++
++
++def remove_signature_background(raw: bytes) -> bytes:
++    """Return a cropped transparent PNG. Raises ValueError if image cannot be read.
++
++    Dark ink on light paper stays dark. Light ink on a grey or dark field is kept
++    as the same strokes, recoloured dark enough to read on a white report, and the
++    field becomes transparent. An image that is already transparent is not repainted
++    unless the strokes themselves are light. Too little ink leaves the pixels unchanged.
++    """
++    try:
++        from PIL import Image
++    except ImportError as e:
++        raise RuntimeError("Pillow is required for signature background removal") from e
++
++    img = Image.open(io.BytesIO(raw)).convert("RGBA")
++    max_side = 1600
++    if max(img.size) > max_side:
++        img.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
++
++    w, h = img.size
++    px = list(img.getdata())
++    if not px:
++        raise ValueError("empty signature image")
+ 
++    transparent = sum(1 for _r, _g, _b, a in px if a < 24)
++    if transparent >= 0.35 * w * h:
++        ink = [(r, g, b, a) for r, g, b, a in px if a >= 40]
++        if len(ink) >= 30:
++            mean = sum(_lum(r, g, b) for r, g, b, _a in ink) / len(ink)
++            out_px = []
++            for r, g, b, a in px:
++                if a < 24:
++                    out_px.append((0, 0, 0, 0))
++                elif mean >= 170:
++                    out_px.append((18, 18, 18, a))
++                else:
++                    out_px.append((r, g, b, a))
++            return _finish(raw, img, out_px)
++
++    samples = []
++    for x0, y0, x1, y1 in (
++        (0, 0, min(80, w), min(80, h)),
++        (max(0, w - 80), 0, w, min(80, h)),
++        (0, max(0, h - 80), min(80, w), h),
++        (max(0, w - 80), max(0, h - 80), w, h),
++    ):
++        for y in range(y0, y1, 2):
++            for x in range(x0, x1, 2):
++                r, g, b, _a = px[y * w + x]
++                samples.append(_lum(r, g, b))
++    if not samples:
++        raise ValueError("empty signature image")
++    bg = _median(samples)
++
++    if bg >= 165:
++        # Dark ink on light paper. Sample the brightest corner pixels as the paper colour.
++        colour_samples = []
++        for x0, y0, x1, y1 in (
++            (0, 0, min(80, w), min(80, h)),
++            (max(0, w - 80), 0, w, min(80, h)),
++            (0, max(0, h - 80), min(80, w), h),
++            (max(0, w - 80), max(0, h - 80), w, h),
++        ):
++            for y in range(y0, y1, 2):
++                for x in range(x0, x1, 2):
++                    colour_samples.append(px[y * w + x][:3])
++        colour_samples.sort(key=lambda t: _lum(*t), reverse=True)
++        cut = max(1, int(len(colour_samples) * 0.5))
++        pr = sum(s[0] for s in colour_samples[:cut]) / cut
++        pg = sum(s[1] for s in colour_samples[:cut]) / cut
++        pb = sum(s[2] for s in colour_samples[:cut]) / cut
++        paper_lum = _lum(pr, pg, pb)
++        paper_blue_bias = max(0.0, pb - max(pr, pg))
++        alpha = [0] * (w * h)
++        rgb = [(0, 0, 0)] * (w * h)
++        for i, (r, g, b, _a) in enumerate(px):
++            darkness = paper_lum - _lum(r, g, b)
++            dist = ((r - pr) ** 2 + (g - pg) ** 2 + (b - pb) ** 2) ** 0.5
++            blue_bias = max(0.0, b - max(r, g) - paper_blue_bias)
++            ink = 0.0
++            if darkness > 14:
++                ink = max(ink, darkness)
++            if darkness > 12 and dist > 28:
++                ink = max(ink, dist * 0.55)
++            if darkness > 18 and blue_bias > 8:
++                ink = max(ink, blue_bias * 1.6 + darkness * 0.3)
++            if ink <= 18:
++                a_out = 0
++            elif ink >= 70:
++                a_out = 255
++            else:
++                a_out = int(round((ink - 18) / (70 - 18) * 255))
++            if a_out < 18:
++                a_out = 0
++            if a_out:
++                factor = 0.78 if darkness < 80 else 0.72
++                rgb[i] = (max(0, int(r * factor)), max(0, int(g * factor)), max(0, int(b * factor)))
++                alpha[i] = a_out
++    else:
++        # Light handwriting on a grey or dark field. Keep the stroke mask, drop the field.
++        alpha = [0] * (w * h)
++        rgb = [(18, 18, 18)] * (w * h)
++        for i, (r, g, b, _a) in enumerate(px):
++            lightness = _lum(r, g, b) - bg
++            if lightness <= 18:
++                continue
++            a_out = 255 if lightness >= 70 else int(round((lightness - 18) / (70 - 18) * 255))
++            if a_out < 18:
++                continue
++            alpha[i] = a_out
++
++    keep = _keep_components(alpha, w, h)
+     out_px = []
+-    minx, miny, maxx, maxy = w, h, 0, 0
+-    ink_count = 0
+     for i in range(w * h):
+         if keep[i] and alpha[i]:
+             r, g, b = rgb[i]
+             out_px.append((r, g, b, alpha[i]))
+-            ink_count += 1
+-            # Crop from solid ink only — soft haze must not inflate the box
+-            if alpha[i] >= 48:
+-                x, y = i % w, i // w
+-                minx = min(minx, x)
+-                miny = min(miny, y)
+-                maxx = max(maxx, x)
+-                maxy = max(maxy, y)
          else:
-             study_obj.is_urgent = is_urg
-             study_obj.modality = study_modality
--            if study_date_map.get(bp) or study_time_map.get(bp):
-+            if study_date_map.get(bp) or study_time_map.get(bp) or view_labels:
-                 smeta = dict(study_obj.metadata_ or {})
-                 if study_date_map.get(bp):
-                     smeta["studyDate"] = study_date_map[bp]
-                 if study_time_map.get(bp):
-                     smeta["studyTime"] = study_time_map[bp]
-+                if view_labels:
-+                    smeta["views"] = view_labels
-                 study_obj.metadata_ = smeta
-             db.commit()
- 
-diff --git a/app/routers/study_reports.py b/app/routers/study_reports.py
-index 90a3dd9..1c09ff7 100644
---- a/app/routers/study_reports.py
-+++ b/app/routers/study_reports.py
-@@ -400,6 +400,12 @@ def resolve_case_and_study(db: Session, case_id: str, study_id: str):
-             study_id = study.id
-     if not case:
-         raise HTTPException(status_code=404, detail="Case not found")
-+    try:
-+        from app.soft_delete import is_deleted
-+    except ImportError:
-+        from app.soft_delete import is_deleted
-+    if is_deleted(case):
-+        raise HTTPException(status_code=404, detail="Case not found")
-     if not study:
-         study = (
-             db.query(StudyDB)
-@@ -613,6 +619,10 @@ def get_my_partial_cases(
-     db: Session = Depends(get_db),
-     current_user: UserDB = Depends(require_roles("DOCTOR")),
- ):
-+    try:
-+        from app.soft_delete import is_deleted
-+    except ImportError:
-+        from app.soft_delete import is_deleted
-     keys = {str(k) for k in _doctor_claim_identity_keys(db, current_user)}
-     claimed = db.query(StudyDB).filter(StudyDB.claimed_by.in_(list(keys))).all()
-     case_ids = {s.case_id for s in claimed}
-@@ -622,7 +632,7 @@ def get_my_partial_cases(
-         if not is_partial_case(studies):
-             continue
-         case = db.query(CaseDB).filter(CaseDB.id == case_id).first()
--        if not case:
-+        if not case or is_deleted(case):
-             continue
-         signed, total = signed_count(studies)
-         items.append({
-diff --git a/app/schemas.py b/app/schemas.py
-index 424944b..abc7d59 100644
---- a/app/schemas.py
-+++ b/app/schemas.py
-@@ -145,6 +145,9 @@ class StudyUpload(BaseModel):
-     """One body-part study with its own view images (create/upload payload)."""
-     bodyPart: str
-     images: List[str] = []
-+    # Explicit projection labels selected in the upload form (AP, LATERAL, ...).
-+    # These are not image files. Billing counts this list, not len(images).
-+    views: Optional[List[str]] = None
-     # This study's own date (DD-MM-YYYY or YYYY-MM-DD); stored in studies.metadata.studyDate
-     studyDate: Optional[str] = None
-     # HH:MM (24h) when the image was scanned; stored in studies.metadata.studyTime
-diff --git a/app/soft_delete.py b/app/soft_delete.py
-index 66ed594..bd22218 100644
---- a/app/soft_delete.py
-+++ b/app/soft_delete.py
-@@ -166,6 +166,34 @@ def soft_delete_center_and_orphaned_logins(db: Session, center_id: str) -> None:
-             mark_deleted(u)
+             out_px.append((0, 0, 0, 0))
+-
+-    if ink_count < 30:
+-        logger.warning("Signature background removal found little ink; keeping original")
+-        buf = io.BytesIO()
+-        Image.open(io.BytesIO(raw)).convert("RGBA").save(buf, format="PNG", optimize=True)
+-        return buf.getvalue()
+-
+-    out = Image.new("RGBA", (w, h))
+-    out.putdata(out_px)
+-    pad = 12
+-    box = (max(0, minx - pad), max(0, miny - pad), min(w, maxx + 1 + pad), min(h, maxy + 1 + pad))
+-    out = out.crop(box)
+-
+-    buf = io.BytesIO()
+-    out.save(buf, format="PNG", optimize=True)
+-    return buf.getvalue()
++    return _finish(raw, img, out_px)
  
  
-+def hidden_patient_case_ids(db: Session, case_ids) -> set:
-+    """Case ids that must leave live doctor lists and open invoices.
-+
-+    A soft-deleted case, or an id with no case row (orphan line), is hidden.
-+    The case row itself is not removed.
-+    """
-+    ids = []
-+    seen = set()
-+    for raw in case_ids or []:
-+        if not raw or raw in seen:
-+            continue
-+        seen.add(raw)
-+        ids.append(raw)
-+    if not ids:
-+        return set()
-+    try:
-+        from app.models import CaseDB
-+    except ImportError:
-+        from app.models import CaseDB
-+    rows = db.query(CaseDB.id, CaseDB.deleted_at).filter(CaseDB.id.in_(ids)).all()
-+    found = {row[0]: row[1] for row in rows}
-+    hidden = set()
-+    for cid in ids:
-+        if cid not in found or found[cid]:
-+            hidden.add(cid)
-+    return hidden
-+
-+
- def soft_delete_case(db: Session, case_id: str) -> dict:
-     """Mark the patient case deleted. Studies/files kept for history; lists hide it."""
-     try:
-@@ -182,6 +210,13 @@ def soft_delete_case(db: Session, case_id: str) -> dict:
-     if legacy is not None and hasattr(legacy, "deleted_at"):
-         # legacy table may not have the column; ignore if missing
-         pass
-+    if case is not None:
-+        # Open centre/doctor invoices drop this patient's lines. Paid/locked stay.
-+        try:
-+            from app.billing import exclude_case_from_open_invoices
-+        except ImportError:
-+            from app.billing import exclude_case_from_open_invoices
-+        exclude_case_from_open_invoices(db, case_id)
-     return counts
- 
- 
-diff --git a/app/view_billing.py b/app/view_billing.py
+ def clean_signature_data_url(data_url: str) -> Optional[str]:
+diff --git a/scripts/preview_doctor_default_rates.py b/scripts/preview_doctor_default_rates.py
 new file mode 100644
-index 0000000..5f20d86
+index 0000000..fd41888
 --- /dev/null
-+++ b/app/view_billing.py
-@@ -0,0 +1,619 @@
-+"""Billable X-ray view count.
++++ b/scripts/preview_doctor_default_rates.py
+@@ -0,0 +1,69 @@
++"""Read-only note for the doctor payout default change (20/10 -> 30/15).
 +
-+Prices use the centre rate card (first unit / each additional unit). The unit is
-+an explicit study view, never an uploaded image file.
++Does not UPDATE, DELETE, or INSERT. Does not reprice signed, paid, or historical lines.
 +
-+Authoritative inputs, in order:
-+1. study metadata "views" — the labels the upload form selected (StudyUpload.views).
-+2. Otherwise, view labels explicitly written into the stored body-part name
-+   ("KNEE AP/LATERAL", "CHEST AP SUPINE", "CHEST PA & LATERAL").
-+3. If neither source yields an explicit view, the study counts as one unit.
-+   Image-file rows are not consulted.
++What changes in code:
++  Doctors with no metadata.payoutRates, signing at a centre with no center_pricing row,
++  are paid 30 for the first view and 15 for each additional view on NEW sign-offs.
 +
-+AP/LAT and AP/LATERAL are the same two views. LAT and LATERAL are one view.
-+A single catalog label with no separator (AP SUPINE, SKYLINE VIEW) stays one view.
-+"""
-+from __future__ import annotations
++What is left alone:
++  center_pricing.doctor_first_inr / doctor_additional_inr, including rows still stored
++  as 20/10. Those stay the centre's doctor payout until someone edits that centre.
++  A doctor's metadata.payoutRates, when present, stays and wins over both.
++  Invoice line amounts already written are not modified.
 +
-+import re
-+from typing import Iterable, List, Optional, Sequence
++Take a database backup before deploy. This script only prints.
 +
-+_BODY_PART_NAMES = """
-+    Abdomen
-+    Kub
-+    Chest
-+    Left Chest
-+    Right Chest
-+    Cervical Spine
-+    Dorsal Spine
-+    Lumbar Spine
-+    Dorso-Lumbar Spine
-+    PBH / Hip
-+    Left Hip
-+    Right Hip
-+    Sacroiliac Joints
-+    Both Knee
-+    Left Knee
-+    Right Knee
-+    Left Ankle
-+    Right Ankle
-+    Both Ankle
-+    Left Shoulder
-+    Right Shoulder
-+    Both Shoulder
-+    Left Elbow
-+    Right Elbow
-+    Both Elbow
-+    Left Wrist
-+    Right Wrist
-+    Both Wrist
-+    Paranasal (PNS)
-+    Left Arm
-+    Right Arm
-+    Both Arms
-+    Coccyx
-+    Finger
-+    Both Feet
-+    Left Foot
-+    Right Foot
-+    Left Forearm
-+    Right Forearm
-+    Both Forearms
-+    Left Hand
-+    Right Hand
-+    Both Hands
-+    Left Leg
-+    Right Leg
-+    Both Legs
-+    Left Mastoid
-+    Right Mastoid
-+    Both Mastoids
-+    Nasal Bones
-+    Skull
-+    Left Thigh
-+    Right Thigh
-+    Both Thighs
-+    Left Thumb
-+    Right Thumb
-+    Both Thumbs
-+    Cologram
-+    HSG
-+    MCU
-+    RGU
-+    DRU
-+    IVP
-+    Barium
-+    Neck
-+    Adenoids
-+    Apicogram
-+    Sinogram
-+    Mandible
-+    Left TM Joint
-+    Right TM Joint
-+    Both TM Joints
-+    Mammography
-+    Abdomen Barium Enema
-+    Abdomen Gallbladder
-+    Abdomen HSG (Hysterosalpingography)
-+    Abdomen Intestine
-+    Abdomen IVP (Intravenous Pyelogram)
-+    Abdomen Pediatric
-+    Ankle
-+    Calcaneus
-+    Left Calcaneus
-+    Right Calcaneus
-+    Both Calcaneus
-+    Both Foot
-+    Foot
-+    Big / First Toe Left Foot
-+    Big / First Toe Right Foot
-+    Big / First Toe both Foot / Feet
-+    Long / Second Toe Left Foot
-+    Long / Second Toe Right Foot
-+    Long / Second Toe both Foot / Feet
-+    Middle / Third Toe Left Foot
-+    Middle / Third Toe Right Foot
-+    Middle / Third Toe both Foot / Feet
-+    Ring / Fourth Toe Left Foot
-+    Ring / Fourth Toe Right Foot
-+    Ring / Fourth Toe both Foot / Feet
-+    Little / Fifth Toe Left Foot
-+    Little / Fifth Toe Right Foot
-+    Little / Fifth Toe both Foot / Feet
-+    Toe Left Foot
-+    Toe Right Foot
-+    Toe both Foot / Feet
-+    Toe
-+    Heel
-+    Left Heel
-+    Right Heel
-+    Both Heels
-+    Skull Mandible
-+    Skull Nasal
-+    Nasal Septum
-+    Left Skull
-+    Right Skull
-+    Skull Cranium
-+    Skull Facial
-+    Skull Sinus
-+    Skull Zygoma
-+    Elbow
-+    Hand
-+    Left Hand BMD (Bone Mineral Density)
-+    Right Hand BMD (Bone Mineral Density)
-+    Cholangiogram
-+    Both Hands BMD (Bone Mineral Density)
-+    Hand BMD (Bone Mineral Density)
-+    Thumb Finger Left Hand
-+    Index Finger Left Hand
-+    Middle Finger Left Hand
-+    Ring Finger Left Hand
-+    Little Finger Left Hand
-+    Thumb Finger Right Hand
-+    Index Finger Right Hand
-+    Middle Finger Right Hand
-+    Ring Finger Right Hand
-+    Little Finger Right Hand
-+    Thumb Finger Both Hands
-+    Index Finger Both Hands
-+    Middle Finger Both Hands
-+    Ring Finger Both Hands
-+    Little Finger Both Hands
-+    Wrist
-+    Scaphoid
-+    Scaphoid Left Wrist
-+    Scaphoid Right Wrist
-+    Scaphoid Both Wrists
-+    Both Hips
-+    Multiple Studies
-+    Pelvis and Both Hips (PBH)
-+    Pelvis
-+    Knee
-+    Knee Patella
-+    Right Orbit
-+    Left Orbit
-+    Orbit
-+    Femur
-+    Left Femur
-+    Right Femur
-+    Both Femurs
-+    Pharynx / larynx
-+    Fibula / Tibia
-+    Left Fibula / Tibia
-+    STN (Soft Tissue Neck)
-+    Right Fibula / Tibia
-+    Both Fibula / Tibia
-+    Nasopharynx
-+    LLI Leg Upright (Long Length Imaging)
-+    LLI Leg Supine (Long Length Imaging)
-+    Mastoid Process
-+    Left Shoulder Clavicle
-+    Right Shoulder Clavicle
-+    Both Shoulder Clavicles
-+    Right Shoulder Scapula
-+    Left Shoulder Scapula
-+    Both Shoulder Scapula
-+    Dental Panoramic Cranium
-+    Dental CEPH (Cephalometric Analysis) Cranium
-+    Both SM Bone (Sesamoid)
-+    Left SM Bone (Sesamoid)
-+    Right SM Bone (Sesamoid)
-+    Both Humerus
-+    LLI Spine Supine (Long Length Imaging)
-+    LLI Spine Uprght (Long Length Imaging)
-+    Right Humerus
-+    Left Humerus
-+    Spine Coccyx
-+    Forearm
-+    Spine Sacrum
-+    Ribs Right Chest
-+    Thoracic Spine
-+    Ribs Left Chest
-+    TL (Thoracolumbar) Spine
-+    Thorax Sternum
-+    Thorax Ribs (Upper)
-+    Sacrum Coccyx
-+    Thorax Ribs (Lower)
-+    Thorax
-+    BMFT (Barium Meal Follow Through)
-+    Contrast Enema
-+    Esophagus
-+    Scanogram
-+    Chest Portable
-+    Scanogram Both Lower Limbs
-+    Chest Pediatric
-+    Scanogram Both Lower Limbs Standing
-+    Scanogram Left Lower Limb
-+    Scanogram Left Lower Limb Standing
-+    Scanogram Right Lower Limb
-+    Scanogram Right Lower Limb Standing
-+    Distal Colostogram
-+    Fistulogram
-+    Loopogram Procedure
-+    Retrograde Urethrography (RUG)
-+    Ascending Urethrography (ASU)
-+    Urethrography (Urethrogram)
-+    Micturating Cystourethrography (MCU )
-+    Voiding cystourethrography (VCUG)
-+    Abdomen Standing
-+    SI Joints (Sacroiliac)
-+    Left Knee Standing
-+    Both AC Joint (Acromio Clavicular)
-+    Right Knee Standing
-+    Right AC Joint (Acromio Clavicular)
-+    Left AC Joint (Acromio Clavicular)
-+    LS Spine (Lumbo Sacral)
-+    Thoracic Inlet
-+    Both Knee Standing
-+    Bilateral Styloid Process
-+    Left Styloid Process
-+    Right Styloid Process
-+    Left Ankle and Foot
-+    Right Ankle and Foot
-+    Both Ankel and Foot
-+    Both Lower Limbs
-+    Both Lower Limbs Standing (Erect)
-+    Left Lower Limbs
-+    Left Lower Limbs Standing (Erect)
-+    Right Lower Limbs
-+    Right Lower Limbs Standing (Erect)
-+    Left Knee and Femur
-+    Left Knee, Hip and Femur
-+    Left Hip and Femur
-+    Right Knee and Femur
-+    Right Knee, Hip and Femur
-+    Right Hip and Femur
-+    Both Knee and Femur
-+    Both Knee, Hip and Femur
-+    Both Hip and Femur
-+    Chest and Abdomen
-+    Full Body
-+    Left Ankle and Fibula / Tibia
-+    Right Ankle and Fibula / Tibia
-+    Both Ankle and Fibula / Tibia
-+    Left Shoulder and Humerus
-+    Right Shoulder and Humerus
-+    Both Shoulder and Humerus
-+    Left Hand and Wrist
-+    Right Hand and Wrist
-+    Both Hands and Wrist
-+    Lumbar Spine and PBH / HIP
-+    Left Shoulder and Cervical Spine
-+    Right Shoulder and Cervical Spine
-+    Both Shoulder and Cervical Spine
-+    Skull Nasal and Mandible
-+    Bladder
-+    Both Hands with Wrists
-+    Foot with Ankle
-+    Right Foot With Ankle
-+    Left Foot with Ankle
-+    Infantogram
-+    IVHRTOGRAM
-+    INVERTOGRAM
-+    ECG
-+    OPG
-+    EEG
-+    Animal Xray
-+    Cholongiogram
-+    Dacryocystography
-+    RIBS
-+    STERNUM
-+    PNS
-+    NASAL BONE
-+    SOFT TISSUE NECK
-+    TMJ
-+    MASTOID
-+    DORSO LUMBAR SPINE
-+    LS SPINE
-+    SACRUM
-+    SACROCOCCYX
-+    WHOLE SPINE
-+    PELVIS WITH BOTH HIPS
-+    HIP
-+    SI JOINTS
-+    LEG
-+    TOES
-+    CLAVICLE
-+    SHOULDER
-+    HUMERUS
-+    THUMB
-+"""
-+
-+_VIEW_NAMES = """
-+    PA
-+    LATERAL
-+    AP ERECT
-+    SUPINE
-+    LORDOTIC
-+    LATERAL DECUBITUS
-+    EXPIRATORY CHEST RADIOGRAPH
-+    STERNUM LATERAL
-+    STERNUM OBLIQUE
-+    RIBS AP
-+    RIBS PA
-+    RIBS OBLIQUE
-+    AP SUPINE
-+    PA SUPINE
-+    PA ERECT
-+    DORSAL DECUBITUS
-+    PA PRONE
-+    OBLIQUE
-+    AP
-+    AP OBLIQUE
-+    PA OBLIQUE
-+    CERVICOTHORACIC (SWIMMER'S VIEW)
-+    AP OPEN MOUTH ODONTOID
-+    AP CLOSED MOUTH ODONTOID (FUCHS VIEW)
-+    LATERAL FLEXION AND EXTENSION
-+    OUTLET
-+    INLET
-+    OBLIQUE ACETABULAR (JUDET VIEW)
-+    FLAMINGO
-+    CLEMENTS-NAKAYAMA
-+    FROG LEG
-+    DUNN
-+    VON ROSEN
-+    HORIZONTAL BEAM LATERAL
-+    AP WEIGHT-BEARING
-+    INTERCONDYLAR
-+    ROSENBERG
-+    SKYLINE LAURINE
-+    SKYLINE MERCHANT
-+    AP MORTISE
-+    AP STRESS
-+    INTERNAL ROTATION
-+    EXTERNAL ROTATION
-+    SUPEROINFERIOR AXIAL
-+    INFEROSUPERIOR AXIAL
-+    MODIFIED TRAUMA AXIAL
-+    SUPINE LATERAL
-+    MODIFIED SUPINE LATERAL
-+    Y LATERAL
-+    AP GLENOID (GRASHEY VIEW)
-+    APICAL OBLIQUE (GARTH VIEW)
-+    HUMERUS (NECK) AP
-+    HUMERUS AXIAL (BICIPITAL GROOVE) (FISK VIEW)
-+    STRYKER NOTCH
-+    SUPRACONDYLAR AP
-+    ACUTE FLEXION AP
-+    COYLE'S
-+    EXTERNAL OBLIQUE
-+    MEDIAL OBLIQUE
-+    CARPAL TUNNEL
-+    TRAPEZIUM
-+    PISIFORM
-+    PA RADIAL DEVIATION
-+    CARPAL BRIDGE
-+    PA ANGLED (CALDWELL VIEW)
-+    PARIETOCANTHAL (WATERS VIEW)
-+    TRANSORAL PARIETOCANTHAL (OPEN MOUTH WATERS VIEW)
-+    SUBMENTOVERTEX (SMV)
-+    DP
-+    WEIGHTBEARING AP
-+    WEIGHTBEARING LATERAL
-+    DP OBLIQUE
-+    BALL-CATCHER (NORGAARD VIEW)
-+    WATERS
-+    AXIAL
-+    AP AXIAL(TOWNE VIEW)
-+    PA AXIAL (CALDWELL VIEW)
-+    OCCIPITOMENTAL (WATERS VIEW)
-+    ACANTHIOPARIETAL (REVERSE WATERS VIEW)
-+    OCCIPITOMENTAL 30º (TITTERINGTON VIEW)
-+    AP/PA
-+    AXIOLATERAL
-+    AP AXIAL
-+    AXIOLATERAL OBLIQUE
-+    STENVERS
-+    MODIFIED STENVERS
-+    AP DECUBITUS
-+    LATERAL XTABLE
-+    SPECIAL
-+    NOT AVAILABLE (NA)
-+    TANGENTIAL
-+    DORSOPLANTAR
-+    TOWNE
-+    CALDWELL
-+    SCAPHOID
-+    PA ULNAR DEVIATION
-+    MULTI VIEW 1
-+    MULTI VIEW 2
-+    MULTI VIEW 3
-+    MULTI VIEW 4
-+    MULTI VIEW 5
-+    MULTI VIEW 6
-+    SKYLINE LAURIN
-+    OM
-+    AXILLARY
-+    AP CEPHALIC
-+    LATERAL OBLIQUE
-+    FLEXION
-+    EXTENSION
-+    PANORAMIC
-+    CEPHALOGRAPHIC
-+    ODONTOID
-+    SWIMMER
-+    PA-Flip Horizontal
-+    AP SUPINE (NEONATAL)
-+    CROSS TABLE LATERAL
-+    ZANCA
-+    OPEN MOUTH
-+    CLOSE MOUTH
-+    PA Flip Horizontal
-+    ECG
-+    OPG
-+    EEG
-+    TUNNEL
-+    SUNRISE
-+    Both Saltzman View
-+    SALTZMAN
-+    LAT
-+    ERECT
-+    WATERS VIEW
-+    CALDWELL VIEW
-+    SKYLINE VIEW
-+    STANDING AP
-+    Y VIEW
-+    VIEWS
-+    PA & LATERAL
-+    AP/LAT
-+    AP/LATERAL
-+    AP/OBLIQUE
-+    PA/OBLIQUE
-+    FLEXION/EXTENSION
-+    LATERAL/AXIAL
-+    AP/AXIAL
-+    ERECT/SUPINE
-+"""
-+
-+_SIDE_RE = re.compile(r"\s*\((LEFT|RIGHT|BOTH)\)\s*$", re.I)
-+
-+# Whole-token synonyms only. "LATERAL DECUBITUS" is not the same view as "LAT".
-+_SYNONYMS = {
-+    "LAT": "LAT",
-+    "LATERAL": "LAT",
-+    "OBL": "OBLIQUE",
-+    "OBLIQUE": "OBLIQUE",
-+}
-+
-+
-+def _norm(value: str) -> str:
-+    text = str(value or "").upper().replace("º", "°").replace("—", "-")
-+    text = text.replace("\u00a0", " ")
-+    text = re.sub(r"\s*/\s*", " / ", text)
-+    text = re.sub(r"\s*&\s*", " & ", text)
-+    text = re.sub(r"\s+", " ", text).strip()
-+    return text
-+
-+
-+def _canon_token(token: str) -> str:
-+    token = _norm(token)
-+    return _SYNONYMS.get(token, token)
-+
-+
-+def _load_names(block: str) -> List[str]:
-+    return [ln.strip() for ln in block.splitlines() if ln.strip()]
-+
-+
-+_BODY_SORTED = tuple(sorted({_norm(n) for n in _load_names(_BODY_PART_NAMES)}, key=len, reverse=True))
-+_KNOWN_VIEWS = frozenset(_canon_token(n) for n in _load_names(_VIEW_NAMES))
-+
-+
-+def _split_combo(label: str) -> List[str]:
-+    """Split on / or & outside parentheses. AP SUPINE (no separator) stays one label."""
-+    parts: List[str] = []
-+    buf: List[str] = []
-+    depth = 0
-+    for ch in label:
-+        if ch == "(":
-+            depth += 1
-+            buf.append(ch)
-+        elif ch == ")":
-+            depth = max(0, depth - 1)
-+            buf.append(ch)
-+        elif depth == 0 and ch in "/&":
-+            parts.append("".join(buf).strip())
-+            buf = []
-+        else:
-+            buf.append(ch)
-+    tail = "".join(buf).strip()
-+    if tail:
-+        parts.append(tail)
-+    return [p for p in parts if p]
-+
-+
-+def _expand_label(label: str) -> List[str]:
-+    """One selected label -> one or more canonical views.
-+
-+    A slash or ampersand combination counts as several views only when every
-+    piece is a known projection (AP/LAT, AP/LATERAL, PA & LATERAL). Otherwise
-+    the whole label is one explicit view, including a custom name.
-+    """
-+    text = _norm(label)
-+    if not text:
-+        return []
-+    pieces = _split_combo(text)
-+    if len(pieces) >= 2:
-+        canon = [_canon_token(p) for p in pieces]
-+        if all(c in _KNOWN_VIEWS for c in canon):
-+            return _unique(canon)
-+    return [_canon_token(text)]
-+
-+
-+def _unique(labels: Iterable[str]) -> List[str]:
-+    out: List[str] = []
-+    seen = set()
-+    for label in labels:
-+        if not label or label in seen:
-+            continue
-+        seen.add(label)
-+        out.append(label)
-+    return out
-+
-+
-+def _body_prefix(text: str) -> str:
-+    for name in _BODY_SORTED:
-+        if text == name or text.startswith(name + " "):
-+            return name
-+    return ""
-+
-+
-+def _parse_view_expression(expr: str) -> List[str]:
-+    expr = _norm(expr)
-+    if not expr:
-+        return []
-+    # Whole remainder is one known projection, including multi-word names
-+    # ("AP SUPINE"). Spaces are not extra views.
-+    whole = _canon_token(expr)
-+    if whole in _KNOWN_VIEWS and len(_split_combo(expr)) == 1:
-+        return [whole]
-+    pieces = _split_combo(expr)
-+    if len(pieces) >= 2:
-+        canon = [_canon_token(p) for p in pieces]
-+        if all(c in _KNOWN_VIEWS for c in canon):
-+            return _unique(canon)
-+    return []
-+
-+
-+def infer_views_from_body_part(body_part: str) -> List[str]:
-+    """Views explicitly present in a stored study name. [] when none are explicit."""
-+    text = _norm(body_part)
-+    text = _SIDE_RE.sub("", text).strip()
-+    if not text:
-+        return []
-+    prefix = _body_prefix(text)
-+    if not prefix:
-+        return _parse_view_expression(text)
-+    remainder = text[len(prefix):].strip()
-+    if not remainder:
-+        return []
-+    return _parse_view_expression(remainder)
-+
-+
-+def explicit_view_labels(views: Optional[Sequence]) -> List[str]:
-+    if not isinstance(views, (list, tuple)):
-+        return []
-+    labels: List[str] = []
-+    for item in views:
-+        if not isinstance(item, str):
-+            continue
-+        labels.extend(_expand_label(item))
-+    return _unique(labels)
-+
-+
-+def billable_view_labels(*, body_part: str = "", explicit_views: Optional[Sequence] = None) -> List[str]:
-+    """Ordered unique views to price for one study.
-+
-+    There is no image-count argument. Missing explicit metadata counts as one unit.
-+    """
-+    chosen = explicit_view_labels(explicit_views)
-+    if chosen:
-+        return chosen
-+    inferred = infer_views_from_body_part(body_part)
-+    if inferred:
-+        return inferred
-+    return ["STUDY"]
-+
-+
-+def billable_view_count(*, body_part: str = "", explicit_views: Optional[Sequence] = None) -> int:
-+    return len(billable_view_labels(body_part=body_part, explicit_views=explicit_views))
-diff --git a/scripts/preview_open_invoice_adjustments.py b/scripts/preview_open_invoice_adjustments.py
-new file mode 100644
-index 0000000..8063a08
---- /dev/null
-+++ b/scripts/preview_open_invoice_adjustments.py
-@@ -0,0 +1,61 @@
-+"""Read-only preview of open-invoice deletion adjustments.
-+
-+Does not UPDATE, DELETE, or INSERT. Does not reprice stored line amounts.
-+Does not touch prepaid wallet ledgers.
-+
-+Already billed studies keep the rupee amount from sign-off. View-count pricing
-+applies to new sign-offs. Deleted patients are omitted from open (not paid,
-+not locked) invoices when those invoices are read; paid and locked invoices
-+stay as the settlement record.
-+
-+Take a database backup before the first production read of invoices after
-+deploy, because that read persists the open-invoice exclusion.
-+
-+Usage (against a database you choose; this script never writes):
-+
-+    python scripts/preview_open_invoice_adjustments.py
++    python scripts/preview_doctor_default_rates.py
 +"""
 +from __future__ import annotations
 +
@@ -1346,610 +526,237 @@ index 0000000..8063a08
 +if ROOT not in sys.path:
 +    sys.path.insert(0, ROOT)
 +
-+from app.billing import (  # noqa: E402
-+    preview_open_invoice_deletion_adjustments,
-+    preview_view_count_deltas,
-+)
 +from app.database import SessionLocal  # noqa: E402
++from app.models import CenterPricingDB, DoctorDB  # noqa: E402
 +
 +
 +def main() -> int:
 +    db = SessionLocal()
 +    try:
-+        deletions = preview_open_invoice_deletion_adjustments(db)
-+        deltas = preview_view_count_deltas(db)
-+        # Prove this process did not flush writes.
++        centres = []
++        for row in db.query(CenterPricingDB).order_by(CenterPricingDB.center_id.asc()).all():
++            centres.append({
++                "centerId": row.center_id,
++                "doctorFirst": int(row.doctor_first_inr),
++                "doctorAdditional": int(row.doctor_additional_inr),
++                "action": "keep",
++                "reason": "explicit centre doctor payout; not rewritten",
++            })
++        doctors = []
++        for doc in db.query(DoctorDB).order_by(DoctorDB.full_name.asc()).all():
++            raw = (doc.metadata_ or {}).get("payoutRates")
++            doctors.append({
++                "doctorId": doc.id,
++                "hasSavedTariff": isinstance(raw, dict) and "firstView" in raw and "additionalView" in raw,
++                "saved": raw if isinstance(raw, dict) else None,
++                "action": "keep" if isinstance(raw, dict) else "use-new-default-on-future-signoff",
++            })
 +        db.rollback()
 +    finally:
 +        db.close()
-+    report = {
++    json.dump({
 +        "writes": False,
-+        "deletionAdjustments": deletions,
-+        "viewCountDeltasNotApplied": deltas,
-+        "notes": [
-+            "action preserve: paid or locked invoice, totals and rows stay.",
-+            "action exclude_on_read: open invoice will drop these lines from totals and detail rows; the line rows remain with status EXCLUDED_DELETED.",
-+            "viewCountDeltasNotApplied is informational only. Do not rewrite stored amounts from it.",
-+            "Prepaid wallet CHARGE rows are not credited by this change.",
-+        ],
-+    }
-+    json.dump(report, sys.stdout, indent=2)
++        "newDefault": {"firstView": 30, "additionalView": 15},
++        "previousCodeDefault": {"firstView": 20, "additionalView": 10},
++        "centreDoctorRatesKept": centres,
++        "doctors": doctors,
++    }, sys.stdout, indent=2)
 +    sys.stdout.write("\n")
 +    return 0
 +
 +
 +if __name__ == "__main__":
 +    raise SystemExit(main())
-diff --git a/tests/run_isolated_api.py b/tests/run_isolated_api.py
-index a6ce982..20f673d 100644
---- a/tests/run_isolated_api.py
-+++ b/tests/run_isolated_api.py
-@@ -8,7 +8,9 @@ os.environ.update({
-     "JWT_SECRET": "e2e-local-secret-e2e-local-secret-123",
-     "CORS_ORIGINS": "http://127.0.0.1:3011,http://localhost:3011",
- })
--sys.path.insert(0, r"C:\Project\Radionline\Radionline_Backend")
-+_HERE = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-+_WIN = r"C:\Project\Radionline\Radionline_Backend"
-+sys.path.insert(0, _WIN if os.path.isdir(_WIN) else _HERE)
- os.chdir(TMP)
- from app.database import engine, Base
- assert engine.dialect.name == "sqlite", engine.url
-diff --git a/tests/test_manager_flow.py b/tests/test_manager_flow.py
-index 3fa3f6f..d99f467 100644
---- a/tests/test_manager_flow.py
-+++ b/tests/test_manager_flow.py
-@@ -7,7 +7,9 @@ os.environ["ENVIRONMENT"] = "development"
- os.environ["FILE_STORAGE_TRANSPORT"] = "local"
- os.environ["FILE_STORAGE_ROOT"] = os.path.join(TMP, "files")
- os.environ["JWT_SECRET"] = "test-secret"
--BACKEND = r"C:\Project\Radionline\Radionline_Backend"
-+_HERE = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-+_WIN = r"C:\Project\Radionline\Radionline_Backend"
-+BACKEND = _WIN if os.path.isdir(_WIN) else _HERE
- sys.path.insert(0, BACKEND)
- os.chdir(TMP)  # ./radionline.db lands in the temp dir
- 
-diff --git a/tests/test_view_billing_and_deletion.py b/tests/test_view_billing_and_deletion.py
+diff --git a/tests/test_signature_image.py b/tests/test_signature_image.py
 new file mode 100644
-index 0000000..3d563c5
+index 0000000..a8f208d
 --- /dev/null
-+++ b/tests/test_view_billing_and_deletion.py
-@@ -0,0 +1,537 @@
-+"""Isolated SQLite tests: view-count billing and deleted-patient invoices.
-+
-+Uses fake patients only. Never connects to Postgres (unreachable DATABASE_URL).
-+"""
++++ b/tests/test_signature_image.py
+@@ -0,0 +1,77 @@
++"""Fixture signatures only. No stored doctor files are rewritten."""
++import io
 +import os
 +import sys
-+import tempfile
-+
-+TMP = tempfile.mkdtemp(prefix="viewbill_")
-+os.environ["DATABASE_URL"] = "postgresql://nobody:nothing@127.0.0.1:1/none"
-+os.environ["ALLOW_SQLITE_FALLBACK"] = "true"
-+os.environ["ENVIRONMENT"] = "development"
-+os.environ["FILE_STORAGE_TRANSPORT"] = "local"
-+os.environ["FILE_STORAGE_ROOT"] = os.path.join(TMP, "files")
-+os.environ["JWT_SECRET"] = "view-billing-test-secret"
 +
 +ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 +sys.path.insert(0, ROOT)
-+os.chdir(TMP)
 +
-+from app.database import engine, Base, SessionLocal  # noqa: E402
++from PIL import Image, ImageDraw
++from app.signature_image import remove_signature_background
 +
-+assert engine.dialect.name == "sqlite", engine.url
-+import app.models  # noqa: E402,F401
-+
-+Base.metadata.create_all(bind=engine)
-+from app.main import app  # noqa: E402
-+from fastapi.testclient import TestClient  # noqa: E402
-+from app.models import (  # noqa: E402
-+    CaseDB,
-+    InvoiceDB,
-+    InvoiceLineItemDB,
-+    StudyImageDB,
-+    UserDB,
-+)
-+from app.security import hash_password  # noqa: E402
-+from app.view_billing import billable_view_count  # noqa: E402
-+from app.billing import (  # noqa: E402
-+    preview_open_invoice_deletion_adjustments,
-+    preview_view_count_deltas,
-+)
-+
-+c = TestClient(app)
 +results = []
 +
 +
 +def check(name, cond, extra=""):
 +    results.append((name, bool(cond)))
-+    print(("PASS " if cond else "FAIL ") + name + (("  -> " + str(extra)[:500]) if not cond else ""))
++    print(("PASS " if cond else "FAIL ") + name + (("  -> " + str(extra)[:200]) if not cond else ""))
 +
 +
-+db = SessionLocal()
-+if not db.query(UserDB).filter(UserDB.email == "sa@view.test").first():
-+    db.add(UserDB(
-+        email="sa@view.test",
-+        name="View SA",
-+        role="SUPER_ADMIN",
-+        metadata_={"password": hash_password("SaPass123!")},
-+    ))
-+    db.commit()
-+db.close()
++def png(img):
++    buf = io.BytesIO()
++    img.save(buf, format="PNG")
++    return buf.getvalue()
 +
 +
-+def login(email, password):
-+    r = c.post("/api/auth/login", json={"email": email, "password": password})
-+    assert r.status_code == 200, r.text
-+    body = r.json()
-+    return {"Authorization": "Bearer " + body["access_token"]}, body["user"]
++def load(raw):
++    return Image.open(io.BytesIO(raw)).convert("RGBA")
 +
 +
-+SA, _ = login("sa@view.test", "SaPass123!")
++def stroke(bg, ink, width=5):
++    img = Image.new("RGBA", (140, 90), bg)
++    draw = ImageDraw.Draw(img)
++    draw.line((18, 50, 120, 28), fill=ink, width=width)
++    draw.line((30, 62, 100, 70), fill=ink, width=width)
++    return img
 +
 +
-+def pure_view_counts():
-+    check("one view label", billable_view_count(body_part="CHEST PA") == 1)
-+    check("AP SUPINE is one view", billable_view_count(body_part="CHEST AP SUPINE") == 1)
-+    check("AP/LATERAL is two views", billable_view_count(body_part="KNEE AP/LATERAL") == 2)
-+    check("AP/LAT matches AP/LATERAL", billable_view_count(body_part="FOREARM AP/LAT") == 2)
-+    check("side suffix ignored", billable_view_count(body_part="FINGER AP (RIGHT)") == 1)
-+    check("PA & LATERAL is two", billable_view_count(body_part="CHEST PA & LATERAL") == 2)
-+    check("no view metadata is one unit", billable_view_count(body_part="CUSTOM PROCEDURE") == 1)
-+    check("unknown second token is not guessed", billable_view_count(body_part="KNEE AP/MYSTERY") == 1)
-+    check(
-+        "explicit two views",
-+        billable_view_count(body_part="KNEE", explicit_views=["AP", "LATERAL"]) == 2,
-+    )
-+    check(
-+        "LAT and LATERAL are one view",
-+        billable_view_count(body_part="KNEE", explicit_views=["LAT", "LATERAL"]) == 1,
-+    )
-+    check(
-+        "explicit list beats a one-view name",
-+        billable_view_count(body_part="CHEST PA", explicit_views=["AP", "LATERAL"]) == 2,
-+    )
-+    # The helper has no image argument; a large file count cannot be passed in.
-+    check("function does not accept an image count", "image" not in billable_view_count.__code__.co_varnames)
++def measure(img):
++    px = list(img.getdata())
++    return {
++        "transparent": sum(1 for p in px if p[3] < 24),
++        "dark": sum(1 for p in px if p[3] > 80 and p[0] < 60),
++        "grey_field": sum(1 for p in px if p[3] > 200 and 90 < p[0] < 180),
++        "white_ink": sum(1 for p in px if p[3] > 200 and p[0] > 220),
++        "n": len(px),
++    }
 +
 +
-+def make_center(name, email, password):
-+    r = c.post("/api/centers", headers=SA, json={
-+        "centerName": name,
-+        "email": email,
-+        "contactNumber": "9000000001",
-+        "username": email,
-+        "password": password,
-+    })
-+    check(f"create centre {name}", r.status_code == 200, r.text)
-+    return r.json()["id"]
++dark = load(remove_signature_background(png(stroke((255, 255, 255, 255), (12, 12, 12, 255)))))
++m = measure(dark)
++check("dark ink on white keeps dark strokes", m["dark"] > 40, m)
++check("dark ink paper is transparent", m["transparent"] > m["n"] * 0.7, m)
++check("dark ink does not leave a grey field", m["grey_field"] == 0, m)
 +
++light = load(remove_signature_background(png(stroke((136, 136, 136, 255), (248, 248, 248, 255)))))
++m = measure(light)
++check("white on grey becomes dark strokes", m["dark"] > 40, m)
++check("grey field is removed", m["grey_field"] == 0 and m["white_ink"] == 0, m)
++check("white on grey background is transparent", m["transparent"] > m["n"] * 0.7, m)
 +
-+def make_doctor(name, email, password):
-+    first, last = name.split(" ", 1)
-+    r = c.post("/api/doctors", headers=SA, json={
-+        "firstName": first,
-+        "lastName": last,
-+        "fullName": name,
-+        "email": email,
-+        "contactNumber": "9000000002",
-+        "username": email,
-+        "password": password,
-+    })
-+    check(f"create doctor {name}", r.status_code == 200, r.text)
-+    return r.json()["id"]
++clear = load(remove_signature_background(png(stroke((0, 0, 0, 0), (8, 8, 8, 255)))))
++m = measure(clear)
++check("transparent dark ink stays dark", m["dark"] > 40 and m["white_ink"] == 0, m)
 +
++white_clear = load(remove_signature_background(png(stroke((0, 0, 0, 0), (255, 255, 255, 255), 6))))
++m = measure(white_clear)
++check("transparent white ink is darkened, not dropped", m["dark"] > 40 and m["white_ink"] == 0, m)
 +
-+def upload(center_id, doctor_headers, full_name, studies):
-+    r = c.post("/api/reports", headers=SA, json={
-+        "fullName": full_name,
-+        "patientNumber": "",
-+        "age": 40,
-+        "gender": "Female",
-+        "phone": "9000000099",
-+        "radiologyCenterId": center_id,
-+        "radiologyCenterName": "ignored",
-+        "referringPhysicianId": "ref-1",
-+        "referringPhysicianName": "REFERRER TEST",
-+        "assignedDoctorIds": ["ALL"],
-+        "status": "Pending",
-+        "studyDate": "07-11-2026",
-+        "modality": "X-Ray",
-+        "bodyParts": [s["bodyPart"] for s in studies],
-+        "studyUploads": studies,
-+    })
-+    check(f"upload {full_name}", r.status_code == 200, r.text)
-+    body = r.json()
-+    case_id = body["id"]
-+    r = c.post(f"/api/reports/{case_id}/claim", headers=doctor_headers, json={
-+        "doctorId": "ignored",
-+        "doctorName": "ignored",
-+    })
-+    check(f"claim {full_name}", r.status_code == 200, r.text)
-+    loaded = c.get(f"/api/reports/{case_id}", headers=SA)
-+    check(f"load {full_name}", loaded.status_code == 200, loaded.text)
-+    return loaded.json()
-+
-+
-+def add_images(study_id, n):
-+    db = SessionLocal()
-+    for i in range(n):
-+        db.add(StudyImageDB(
-+            id=f"img-{study_id}-{i}",
-+            study_id=study_id,
-+            image_url=f"mem://fake/{study_id}/{i}",
-+            image_type="uploaded",
-+            created_at="2026-11-07T00:00:00Z",
-+        ))
-+    db.commit()
-+    count = db.query(StudyImageDB).filter(StudyImageDB.study_id == study_id).count()
-+    db.close()
-+    return count
-+
-+
-+def sign_all(doctor_headers, report):
-+    for study in report.get("studies") or []:
-+        r = c.post(
-+            f"/api/reports/{report['id']}/studies/{study['id']}/sign",
-+            headers=doctor_headers,
-+            json={"findings": "No acute fake finding.", "impression": "Normal fake study."},
-+        )
-+        check(f"sign {study.get('bodyPart')}", r.status_code == 200, r.text)
-+        if r.status_code == 200 and r.json().get("caseComplete"):
-+            return r.json()
-+    return None
-+
-+
-+def doctor_invoice(headers):
-+    listed = c.get("/api/invoices", headers=headers, params={"partyType": "doctor"})
-+    check("doctor invoice list", listed.status_code == 200, listed.text)
-+    rows = listed.json()
-+    if not rows:
-+        return None
-+    detail = c.get(f"/api/invoices/{rows[0]['id']}", headers=headers)
-+    check("doctor invoice detail", detail.status_code == 200, detail.text)
-+    return detail.json()
-+
-+
-+def center_invoice_for(center_id):
-+    listed = c.get("/api/invoices", headers=SA, params={"partyType": "center", "partyId": center_id})
-+    rows = listed.json()
-+    if not rows:
-+        return None
-+    return c.get(f"/api/invoices/{rows[0]['id']}", headers=SA).json()
-+
-+
-+def line_for(inv, name):
-+    for li in inv.get("lineItems") or []:
-+        if li.get("patientName") == name:
-+            return li
-+    return None
-+
-+
-+def totals_consistent(inv, label):
-+    items = inv.get("lineItems") or []
-+    total = int(inv.get("totalAmount") or 0)
-+    check(f"{label} lines sum to total", sum(int(li["amount"]) for li in items) == total, inv)
-+    days = inv.get("byDay") or []
-+    if days:
-+        check(
-+            f"{label} day totals sum",
-+            sum(int(d["dayTotal"]) for d in days) == total,
-+            days,
-+        )
-+    centers = inv.get("byCenter") or []
-+    if centers:
-+        check(
-+            f"{label} centre totals sum",
-+            sum(int(x["centerTotal"]) for x in centers) == total,
-+            centers,
-+        )
-+
-+
-+pure_view_counts()
-+
-+north = make_center("North Test Centre", "north@view.test", "North123!")
-+south = make_center("South Test Centre", "south@view.test", "South123!")
-+rated = make_center("Rated Test Centre", "rated@view.test", "Rated123!")
-+make_doctor("Ada Ray", "ada@view.test", "AdaRay123!")
-+make_doctor("Bea Ray", "bea@view.test", "BeaRay123!")
-+make_doctor("Cara Ray", "cara@view.test", "CaraRay123!")
-+ADA, _ = login("ada@view.test", "AdaRay123!")
-+BEA, _ = login("bea@view.test", "BeaRay123!")
-+CARA, _ = login("cara@view.test", "CaraRay123!")
-+NORTH, _ = login("north@view.test", "North123!")
-+SOUTH, _ = login("south@view.test", "South123!")
-+
-+r = c.put(f"/api/billing/center-pricing/{rated}", headers=SA, json={
-+    "centerFirstStudy": 50,
-+    "centerAdditionalStudy": 9,
-+    "doctorFirstStudy": 40,
-+    "doctorAdditionalStudy": 7,
-+})
-+check("custom tariff saved", r.status_code == 200, r.text)
-+
-+# 1 explicit view, many image files.
-+one = upload(north, ADA, "FAKE PATIENT ONE", [{
-+    "bodyPart": "CHEST PA",
-+    "views": ["PA"],
-+    "images": [],
-+    "studyDate": "07-11-2026",
-+}])
-+imgs = add_images(one["studies"][0]["id"], 6)
-+check("six image files stored", imgs == 6)
-+sign_all(ADA, one)
-+
-+# 2 explicit views, one image file.
-+two = upload(north, ADA, "FAKE PATIENT TWO", [{
-+    "bodyPart": "KNEE AP/LATERAL",
-+    "views": ["AP", "LATERAL"],
-+    "images": [],
-+    "studyDate": "07-11-2026",
-+}])
-+imgs = add_images(two["studies"][0]["id"], 1)
-+check("one image file stored for two views", imgs == 1)
-+sign_all(ADA, two)
-+
-+# Historical name only, no views array. AP/LATERAL must still be 2.
-+hist = upload(south, ADA, "FAKE PATIENT HIST", [{
-+    "bodyPart": "FOREARM AP/LATERAL",
-+    "images": [],
-+    "studyDate": "07-11-2026",
-+}])
-+add_images(hist["studies"][0]["id"], 4)
-+sign_all(ADA, hist)
-+
-+# Missing view metadata: one unit, not the file count.
-+missing = upload(south, ADA, "FAKE PATIENT PLAIN", [{
-+    "bodyPart": "CUSTOM PROCEDURE",
-+    "images": [],
-+    "studyDate": "07-11-2026",
-+}])
-+add_images(missing["studies"][0]["id"], 5)
-+sign_all(ADA, missing)
-+
-+# Two studies in one case: 1 view then 2 views. Second study is not priced as a single additional study.
-+combo = upload(north, ADA, "FAKE PATIENT COMBO", [
-+    {"bodyPart": "CHEST AP SUPINE", "views": ["AP SUPINE"], "images": [], "studyDate": "07-11-2026"},
-+    {"bodyPart": "LUMBAR SPINE AP/LAT", "views": ["AP", "LAT"], "images": [], "studyDate": "07-11-2026"},
-+])
-+add_images(combo["studies"][0]["id"], 3)
-+add_images(combo["studies"][1]["id"], 3)
-+signed = sign_all(ADA, combo)
-+check("combo billing viewCount is 3", (signed or {}).get("billing", {}).get("viewCount") == 3, signed)
-+
-+# Custom rate card: 2 views => first + additional, not 2x first.
-+rated_case = upload(rated, ADA, "FAKE PATIENT RATED", [{
-+    "bodyPart": "KNEE",
-+    "views": ["AP", "LATERAL"],
-+    "images": [],
-+    "studyDate": "07-11-2026",
-+}])
-+sign_all(ADA, rated_case)
-+
-+inv = doctor_invoice(ADA)
-+check("doctor invoice loaded", inv is not None)
-+if inv:
-+    totals_consistent(inv, "doctor")
-+    one_line = line_for(inv, "FAKE PATIENT ONE")
-+    two_line = line_for(inv, "FAKE PATIENT TWO")
-+    hist_line = line_for(inv, "FAKE PATIENT HIST")
-+    plain_line = line_for(inv, "FAKE PATIENT PLAIN")
-+    combo_line_chest = None
-+    combo_line_spine = None
-+    for li in inv["lineItems"]:
-+        if li["patientName"] != "FAKE PATIENT COMBO":
-+            continue
-+        if "SUPINE" in (li.get("bodyPart") or ""):
-+            combo_line_chest = li
-+        if "LUMBAR" in (li.get("bodyPart") or ""):
-+            combo_line_spine = li
-+    rated_line = line_for(inv, "FAKE PATIENT RATED")
-+    check("1 view 6 files pays first rate", one_line and one_line["amount"] == 20 and one_line["quantity"] == 1, one_line)
-+    check("2 views 1 file pays first+additional", two_line and two_line["amount"] == 30 and two_line["quantity"] == 2, two_line)
-+    check("historical AP/LATERAL is 30", hist_line and hist_line["amount"] == 30, hist_line)
-+    check("missing views ignore 5 files", plain_line and plain_line["amount"] == 20 and plain_line["quantity"] == 1, plain_line)
-+    check("AP SUPINE priced once", combo_line_chest and combo_line_chest["amount"] == 20, combo_line_chest)
-+    check("second study two views are additional rates", combo_line_spine and combo_line_spine["amount"] == 20, combo_line_spine)
-+    check("custom tariff 40+7", rated_line and rated_line["amount"] == 47, rated_line)
-+
-+north_inv = center_invoice_for(north)
-+south_inv = center_invoice_for(south)
-+rated_inv = center_invoice_for(rated)
-+if north_inv:
-+    totals_consistent(north_inv, "north centre")
-+    check("north one-view centre charge 30", line_for(north_inv, "FAKE PATIENT ONE")["amount"] == 30)
-+    check("north two-view centre charge 45", line_for(north_inv, "FAKE PATIENT TWO")["amount"] == 45)
-+if rated_inv:
-+    check("rated centre 50+9", line_for(rated_inv, "FAKE PATIENT RATED")["amount"] == 59, rated_inv)
-+
-+# Other doctor cannot see Ada's work. Centre login cannot open My Work.
-+bea_work = c.get("/api/reports/my-work", headers=BEA)
-+check("other doctor my-work empty", bea_work.status_code == 200 and bea_work.json()["total"] == 0, bea_work.text)
-+ada_work = c.get("/api/reports/my-work", headers=ADA)
-+check("owner my-work lists fake patients", ada_work.status_code == 200 and ada_work.json()["total"] >= 5, ada_work.text)
-+check("centre cannot open my-work", c.get("/api/reports/my-work", headers=NORTH).status_code == 403)
-+denied = c.get(f"/api/reports/{one['id']}", headers=BEA)
-+check("other doctor denied case", denied.status_code == 403, denied.text)
-+south_read = c.get(f"/api/invoices/{north_inv['id']}", headers=SOUTH) if north_inv else None
-+check("other centre denied invoice", south_read is not None and south_read.status_code == 403, getattr(south_read, "text", None))
-+
-+# Partial case disappears from doctor partial list and my-work after delete.
-+partial = upload(north, ADA, "FAKE PATIENT PARTIAL", [
-+    {"bodyPart": "CHEST PA", "views": ["PA"], "images": [], "studyDate": "07-11-2026"},
-+    {"bodyPart": "KNEE AP", "views": ["AP"], "images": [], "studyDate": "07-11-2026"},
-+])
-+first_study = partial["studies"][0]
-+r = c.post(
-+    f"/api/reports/{partial['id']}/studies/{first_study['id']}/sign",
-+    headers=ADA,
-+    json={"findings": "Partial fake finding."},
-+)
-+check("partial sign", r.status_code == 200 and r.json().get("caseComplete") is False, r.text)
-+partials = c.get("/api/reports/my-partial-cases", headers=BEA)
-+# Bea did not claim it.
-+check("other doctor partials empty", partials.status_code == 200 and partials.json()["total"] == 0, partials.text)
-+partials = c.get("/api/reports/my-partial-cases", headers=ADA)
-+check("owner sees partial", any(i["id"] == partial["id"] for i in partials.json()["items"]), partials.text)
-+deleted = c.delete(f"/api/reports/{partial['id']}", headers=SA)
-+check("delete partial", deleted.status_code == 204, deleted.text)
-+partials = c.get("/api/reports/my-partial-cases", headers=ADA)
-+check("deleted partial hidden", all(i["id"] != partial["id"] for i in partials.json()["items"]), partials.text)
-+ada_work = c.get("/api/reports/my-work", headers=ADA)
-+check("deleted patient hidden from my-work", all(i["id"] != partial["id"] for i in ada_work.json()["items"]), ada_work.text)
-+check("delete does not remove other my-work rows", any(i["id"] == one["id"] for i in ada_work.json()["items"]))
-+check("deleted case 404", c.get(f"/api/reports/{partial['id']}", headers=ADA).status_code == 404)
-+check("deleted case 404 for other doctor", c.get(f"/api/reports/{partial['id']}", headers=BEA).status_code == 404)
-+
-+# Delete a billed patient: open invoices drop that row and recompute. Other patients stay.
-+before_doc = doctor_invoice(ADA)
-+before_two = line_for(before_doc, "FAKE PATIENT TWO")["amount"]
-+before_total = before_doc["totalAmount"]
-+check("delete billed two-view patient", c.delete(f"/api/reports/{two['id']}", headers=SA).status_code == 204)
-+after_doc = doctor_invoice(ADA)
-+check("deleted patient row gone", line_for(after_doc, "FAKE PATIENT TWO") is None, after_doc)
-+check("other patients remain", line_for(after_doc, "FAKE PATIENT ONE") and line_for(after_doc, "FAKE PATIENT HIST"))
-+check(
-+    "doctor total reduced by deleted amount only",
-+    after_doc["totalAmount"] == before_total - before_two,
-+    (before_total, before_two, after_doc["totalAmount"]),
-+)
-+totals_consistent(after_doc, "doctor after delete")
-+north_after = center_invoice_for(north)
-+south_after = center_invoice_for(south)
-+check("north dropped deleted patient", line_for(north_after, "FAKE PATIENT TWO") is None)
-+check("north kept the other patient", line_for(north_after, "FAKE PATIENT ONE")["amount"] == 30, north_after)
-+check("south invoice unchanged", line_for(south_after, "FAKE PATIENT HIST")["amount"] == 45, south_after)
-+check("south plain patient unchanged", line_for(south_after, "FAKE PATIENT PLAIN")["amount"] == 30, south_after)
-+totals_consistent(north_after, "north after delete")
-+totals_consistent(south_after, "south after delete")
-+
-+# Line row is kept, amount unchanged, status marks the exclusion.
-+db = SessionLocal()
-+kept = (
-+    db.query(InvoiceLineItemDB)
-+    .filter(InvoiceLineItemDB.patient_name == "FAKE PATIENT TWO", InvoiceLineItemDB.amount > 0)
-+    .all()
-+)
-+check("excluded rows still stored", len(kept) >= 2)
-+check("excluded rows keep amount", all(int(li.amount) in (30, 45) for li in kept), [(li.amount, li.status) for li in kept])
-+check("excluded status set", all((li.status or "") == "EXCLUDED_DELETED" for li in kept), [li.status for li in kept])
-+db.close()
-+
-+# Already-deleted patient repaired on read, without a prior exclude call.
-+legacy = upload(south, ADA, "FAKE PATIENT LEGACY", [{
-+    "bodyPart": "CHEST PA",
-+    "views": ["PA"],
-+    "images": [],
-+    "studyDate": "07-11-2026",
-+}])
-+sign_all(ADA, legacy)
-+db = SessionLocal()
-+row = db.query(CaseDB).filter(CaseDB.id == legacy["id"]).first()
-+row.deleted_at = "2026-01-01T00:00:00Z"
-+db.commit()
-+stored_before = db.query(InvoiceDB).filter(InvoiceDB.party_type == "doctor").one()
-+stored_total = int(stored_before.total_amount)
-+preview = preview_open_invoice_deletion_adjustments(db)
-+db.rollback()
-+still = int(db.query(InvoiceDB).filter(InvoiceDB.id == stored_before.id).one().total_amount)
-+db.close()
-+check("preview does not write", still == stored_total, (still, stored_total))
-+check(
-+    "preview names the legacy case",
-+    any(line["caseId"] == legacy["id"] and item["action"] == "exclude_on_read" for item in preview for line in item["lines"]),
-+    preview,
-+)
-+legacy_doc = doctor_invoice(ADA)
-+check("legacy deleted row hidden on read", line_for(legacy_doc, "FAKE PATIENT LEGACY") is None)
-+check("read lowered the stored total", legacy_doc["totalAmount"] < stored_total, (legacy_doc["totalAmount"], stored_total))
-+again = doctor_invoice(ADA)
-+check("second read is stable", again["totalAmount"] == legacy_doc["totalAmount"])
-+check("legacy case hidden from my-work", all(i["id"] != legacy["id"] for i in c.get("/api/reports/my-work", headers=ADA).json()["items"]))
-+
-+# Paid invoice is not rewritten.
-+paid_case = upload(north, CARA, "FAKE PATIENT PAID", [{
-+    "bodyPart": "CHEST PA",
-+    "views": ["PA"],
-+    "images": [],
-+    "studyDate": "07-11-2026",
-+}])
-+sign_all(CARA, paid_case)
-+cara_inv = doctor_invoice(CARA)
-+check("mark doctor invoice paid", c.patch(
-+    f"/api/invoices/{cara_inv['id']}/status", headers=SA, json={"status": "paid"}
-+).status_code == 200)
-+paid_total = doctor_invoice(CARA)["totalAmount"]
-+check("delete paid patient", c.delete(f"/api/reports/{paid_case['id']}", headers=SA).status_code == 204)
-+paid_after = doctor_invoice(CARA)
-+check("paid total unchanged", paid_after["totalAmount"] == paid_total, (paid_total, paid_after["totalAmount"]))
-+check("paid detail row kept", line_for(paid_after, "FAKE PATIENT PAID") is not None, paid_after)
-+check("paid patient still hidden from my-work", all(
-+    i["id"] != paid_case["id"] for i in c.get("/api/reports/my-work", headers=CARA).json()["items"]
-+))
-+db = SessionLocal()
-+paid_lines = db.query(InvoiceLineItemDB).filter(InvoiceLineItemDB.patient_name == "FAKE PATIENT PAID").all()
-+check("paid lines not marked excluded", all((li.status or "ACTIVE") != "EXCLUDED_DELETED" for li in paid_lines), [li.status for li in paid_lines])
-+# View-delta preview must not change the paid total.
-+before_delta = int(db.query(InvoiceDB).filter(InvoiceDB.id == cara_inv["id"]).one().total_amount)
-+preview_view_count_deltas(db)
-+db.rollback()
-+after_delta = int(db.query(InvoiceDB).filter(InvoiceDB.id == cara_inv["id"]).one().total_amount)
-+db.close()
-+check("view delta preview does not write", before_delta == after_delta)
-+
-+# Reassign keeps the original multi-view amount and still one active payout per study.
-+re_case = upload(south, ADA, "FAKE PATIENT REASSIGN", [{
-+    "bodyPart": "KNEE AP/LATERAL",
-+    "views": ["AP", "LATERAL"],
-+    "images": [],
-+    "studyDate": "07-11-2026",
-+}])
-+sign_all(ADA, re_case)
-+docs = c.get("/api/doctors", headers=SA).json()
-+bea_id = next(d["id"] for d in docs if d.get("email") == "bea@view.test")
-+r = c.post(f"/api/reports/{re_case['id']}/flag-reassign", headers=SA, json={
-+    "toDoctorId": bea_id,
-+    "reason": "Fake reassign check",
-+})
-+check("reassign", r.status_code == 200, r.text)
-+r = c.post(
-+    f"/api/reports/{re_case['id']}/studies/{re_case['studies'][0]['id']}/sign",
-+    headers=BEA,
-+    json={"findings": "Re-signed fake finding.", "impression": "Still normal."},
-+)
-+check("re-sign", r.status_code == 200, r.text)
-+bea_inv = doctor_invoice(BEA)
-+bea_line = line_for(bea_inv, "FAKE PATIENT REASSIGN") if bea_inv else None
-+check("reissued payout keeps 30", bea_line and bea_line["amount"] == 30 and bea_line["quantity"] == 2, bea_line)
-+south_re = center_invoice_for(south)
-+re_lines = [li for li in (south_re or {}).get("lineItems") or [] if li["patientName"] == "FAKE PATIENT REASSIGN"]
-+check("centre not rebilled on reassign", len(re_lines) == 1 and re_lines[0]["amount"] == 45, re_lines)
-+ada_after_re = doctor_invoice(ADA)
-+ada_re_lines = [li for li in ada_after_re["lineItems"] if li["patientName"] == "FAKE PATIENT REASSIGN"]
-+check("original doctor net zero on reassign", sum(int(li["amount"]) for li in ada_re_lines) == 0, ada_re_lines)
-+check("reassign left one positive and one offset", len(ada_re_lines) == 2, ada_re_lines)
-+
-+# Orphan line (case id with no case row) drops off an open invoice.
-+orphan_case = upload(north, ADA, "FAKE PATIENT ORPHAN", [{
-+    "bodyPart": "CHEST PA",
-+    "views": ["PA"],
-+    "images": [],
-+    "studyDate": "07-11-2026",
-+}])
-+sign_all(ADA, orphan_case)
-+db = SessionLocal()
-+orphan_lines = db.query(InvoiceLineItemDB).filter(InvoiceLineItemDB.case_id == orphan_case["id"]).all()
-+for li in orphan_lines:
-+    li.case_id = "missing-case-orphan"
-+db.commit()
-+db.close()
-+open_doc = doctor_invoice(ADA)
-+check("orphan row hidden", line_for(open_doc, "FAKE PATIENT ORPHAN") is None, open_doc)
-+check("combo patient still present", line_for(open_doc, "FAKE PATIENT COMBO") is not None)
++blank = Image.new("RGBA", (80, 40), (255, 255, 255, 255))
++kept = load(remove_signature_background(png(blank)))
++m = measure(kept)
++check("blank page is not given invented strokes", m["dark"] < 10, m)
 +
 +failed = [name for name, ok in results if not ok]
 +print(f"\n{len(results) - len(failed)} passed, {len(failed)} failed")
 +if failed:
 +    sys.exit(1)
+diff --git a/tests/test_view_billing_and_deletion.py b/tests/test_view_billing_and_deletion.py
+index 3d563c5..a3e0eab 100644
+--- a/tests/test_view_billing_and_deletion.py
++++ b/tests/test_view_billing_and_deletion.py
+@@ -328,12 +328,12 @@ if inv:
+         if "LUMBAR" in (li.get("bodyPart") or ""):
+             combo_line_spine = li
+     rated_line = line_for(inv, "FAKE PATIENT RATED")
+-    check("1 view 6 files pays first rate", one_line and one_line["amount"] == 20 and one_line["quantity"] == 1, one_line)
+-    check("2 views 1 file pays first+additional", two_line and two_line["amount"] == 30 and two_line["quantity"] == 2, two_line)
+-    check("historical AP/LATERAL is 30", hist_line and hist_line["amount"] == 30, hist_line)
+-    check("missing views ignore 5 files", plain_line and plain_line["amount"] == 20 and plain_line["quantity"] == 1, plain_line)
+-    check("AP SUPINE priced once", combo_line_chest and combo_line_chest["amount"] == 20, combo_line_chest)
+-    check("second study two views are additional rates", combo_line_spine and combo_line_spine["amount"] == 20, combo_line_spine)
++    check("1 view 6 files pays first rate", one_line and one_line["amount"] == 30 and one_line["quantity"] == 1, one_line)
++    check("2 views 1 file pays first+additional", two_line and two_line["amount"] == 45 and two_line["quantity"] == 2, two_line)
++    check("historical AP/LATERAL is 45", hist_line and hist_line["amount"] == 45, hist_line)
++    check("missing views ignore 5 files", plain_line and plain_line["amount"] == 30 and plain_line["quantity"] == 1, plain_line)
++    check("AP SUPINE priced once", combo_line_chest and combo_line_chest["amount"] == 30, combo_line_chest)
++    check("second study two views are additional rates", combo_line_spine and combo_line_spine["amount"] == 30, combo_line_spine)
+     check("custom tariff 40+7", rated_line and rated_line["amount"] == 47, rated_line)
+ 
+ north_inv = center_invoice_for(north)
+@@ -496,6 +496,9 @@ r = c.post(f"/api/reports/{re_case['id']}/flag-reassign", headers=SA, json={
+     "reason": "Fake reassign check",
+ })
+ check("reassign", r.status_code == 200, r.text)
++ada_id = next(d["id"] for d in docs if d.get("email") == "ada@view.test")
++r = c.put(f"/api/billing/doctor-pricing/{ada_id}", headers=SA, json={"firstView": 80, "additionalView": 40})
++check("raise doctor tariff after sign-off", r.status_code == 200 and r.json()["isCustom"] is True, r.text)
+ r = c.post(
+     f"/api/reports/{re_case['id']}/studies/{re_case['studies'][0]['id']}/sign",
+     headers=BEA,
+@@ -504,7 +507,7 @@ r = c.post(
+ check("re-sign", r.status_code == 200, r.text)
+ bea_inv = doctor_invoice(BEA)
+ bea_line = line_for(bea_inv, "FAKE PATIENT REASSIGN") if bea_inv else None
+-check("reissued payout keeps 30", bea_line and bea_line["amount"] == 30 and bea_line["quantity"] == 2, bea_line)
++check("reissued payout keeps historical 45", bea_line and bea_line["amount"] == 45 and bea_line["quantity"] == 2, bea_line)
+ south_re = center_invoice_for(south)
+ re_lines = [li for li in (south_re or {}).get("lineItems") or [] if li["patientName"] == "FAKE PATIENT REASSIGN"]
+ check("centre not rebilled on reassign", len(re_lines) == 1 and re_lines[0]["amount"] == 45, re_lines)
+@@ -531,6 +534,67 @@ open_doc = doctor_invoice(ADA)
+ check("orphan row hidden", line_for(open_doc, "FAKE PATIENT ORPHAN") is None, open_doc)
+ check("combo patient still present", line_for(open_doc, "FAKE PATIENT COMBO") is not None)
+ 
++# Doctor tariff: custom applies to new sign-offs, zero is allowed, default is 30/15.
++fresh = upload(north, ADA, "FAKE PATIENT CUSTOM", [{
++    "bodyPart": "CHEST PA",
++    "views": ["PA"],
++    "images": [],
++    "studyDate": "07-11-2026",
++}])
++add_images(fresh["studies"][0]["id"], 4)
++sign_all(ADA, fresh)
++custom_inv = doctor_invoice(ADA)
++custom_line = line_for(custom_inv, "FAKE PATIENT CUSTOM")
++check("custom doctor tariff ignores image count", custom_line and custom_line["amount"] == 80 and custom_line["quantity"] == 1, custom_line)
++check("centre charge ignores doctor tariff", line_for(center_invoice_for(north), "FAKE PATIENT CUSTOM")["amount"] == 30)
++
++r = c.put(f"/api/billing/doctor-pricing/{ada_id}", headers=SA, json={"firstView": 0, "additionalView": 0})
++check("zero payout allowed", r.status_code == 200 and r.json()["firstView"] == 0 and r.json()["isCustom"] is True, r.text)
++zero_case = upload(north, ADA, "FAKE PATIENT ZERO", [{
++    "bodyPart": "CHEST PA", "views": ["PA"], "images": [], "studyDate": "07-11-2026",
++}])
++sign_all(ADA, zero_case)
++zero_line = line_for(doctor_invoice(ADA), "FAKE PATIENT ZERO")
++check("zero tariff pays zero", zero_line and zero_line["amount"] == 0, zero_line)
++check("zero tariff still charges the centre", line_for(center_invoice_for(north), "FAKE PATIENT ZERO")["amount"] == 30)
++
++r = c.put(f"/api/billing/doctor-pricing/{ada_id}", headers=SA, json={"firstView": 30, "additionalView": 15})
++check("saving the default clears the override", r.status_code == 200 and r.json()["isCustom"] is False, r.text)
++default_case = upload(north, ADA, "FAKE PATIENT DEFAULT", [{
++    "bodyPart": "CHEST PA", "views": ["PA"], "images": [], "studyDate": "07-11-2026",
++}])
++sign_all(ADA, default_case)
++check("cleared tariff uses 30", line_for(doctor_invoice(ADA), "FAKE PATIENT DEFAULT")["amount"] == 30)
++
++r = c.put(f"/api/billing/center-pricing/{south}", headers=SA, json={
++    "centerFirstStudy": 30, "centerAdditionalStudy": 15, "doctorFirstStudy": 22, "doctorAdditionalStudy": 11,
++})
++check("centre keeps its own doctor payout", r.status_code == 200, r.text)
++centre_case = upload(south, ADA, "FAKE PATIENT CENTRE RATE", [{
++    "bodyPart": "CHEST PA", "views": ["PA"], "images": [], "studyDate": "07-11-2026",
++}])
++sign_all(ADA, centre_case)
++check(
++    "stored centre doctor rate is not replaced by 30",
++    line_for(doctor_invoice(ADA), "FAKE PATIENT CENTRE RATE")["amount"] == 22,
++)
++check("negative rate rejected", c.put(
++    f"/api/billing/doctor-pricing/{ada_id}", headers=SA, json={"firstView": -1, "additionalView": 15}
++).status_code == 422)
++r = c.post("/api/managers", headers=SA, json={
++    "name": "Pay Mgr", "email": "paymgr@view.test", "password": "PayMgr123!",
++    "permissions": {"doctors": {"read": True, "write": True}},
++})
++check("create payout manager", r.status_code == 200, r.text)
++MGR, _ = login("paymgr@view.test", "PayMgr123!")
++check("manager cannot set doctor payout", c.put(
++    f"/api/billing/doctor-pricing/{ada_id}", headers=MGR, json={"firstView": 1, "additionalView": 1}
++).status_code == 403)
++check("doctor cannot set doctor payout", c.put(
++    f"/api/billing/doctor-pricing/{ada_id}", headers=ADA, json={"firstView": 1, "additionalView": 1}
++).status_code == 403)
++check("doctor cannot list payout admin", c.get("/api/billing/doctor-pricing", headers=ADA).status_code == 403)
++
+ failed = [name for name, ok in results if not ok]
+ print(f"\n{len(results) - len(failed)} passed, {len(failed)} failed")
+ if failed:

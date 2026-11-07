@@ -76,7 +76,95 @@ def get_pricing(
         center_id = None
     out = pricing.pricing_public_dict(billing_svc.rates_for_center(db, center_id))
     out["variesByCenter"] = db.query(CenterPricingDB).first() is not None
+    out["doctorRateSource"] = "default"
+    if user.role == "DOCTOR":
+        personal = billing_svc.explicit_doctor_payout(db, _meta(user).get("doctorId"))
+        if personal:
+            out["doctor"] = {"firstStudy": personal[0], "additionalStudy": personal[1]}
+            out["doctorRateSource"] = "doctor"
+            out["isDefault"] = False
     return out
+
+
+class DoctorPayoutUpdate(BaseModel):
+    firstView: int
+    additionalView: int
+
+
+def _doctor_payout_public(db: Session, doc) -> dict:
+    personal = billing_svc.explicit_doctor_payout(db, doc.id)
+    first, additional = personal or (pricing.DOCTOR_FIRST_STUDY_INR, pricing.DOCTOR_ADDITIONAL_STUDY_INR)
+    return {
+        "doctorId": doc.id,
+        "doctorName": doc.full_name,
+        "firstView": first,
+        "additionalView": additional,
+        "isCustom": personal is not None,
+        "source": "doctor" if personal is not None else "default",
+    }
+
+
+@billing_router.get("/doctor-pricing")
+def list_doctor_pricing(
+    db: Session = Depends(get_db),
+    _user: UserDB = Depends(require_roles("SUPER_ADMIN")),
+):
+    """Super Admin: every doctor's payout. No saved tariff means the default 30/15."""
+    try:
+        from app.models import DoctorDB
+        from app.soft_delete import active_filter
+    except ImportError:
+        from app.models import DoctorDB
+        from app.soft_delete import active_filter
+    docs = active_filter(db.query(DoctorDB), DoctorDB).order_by(DoctorDB.full_name.asc()).all()
+    return {
+        "default": {"firstView": pricing.DOCTOR_FIRST_STUDY_INR, "additionalView": pricing.DOCTOR_ADDITIONAL_STUDY_INR},
+        "doctors": [_doctor_payout_public(db, doc) for doc in docs],
+    }
+
+
+@billing_router.put("/doctor-pricing/{doctor_id}")
+def update_doctor_pricing(
+    doctor_id: str,
+    body: DoctorPayoutUpdate,
+    db: Session = Depends(get_db),
+    user: UserDB = Depends(require_roles("SUPER_ADMIN")),
+):
+    """Super Admin: set one doctor's payout for new sign-offs.
+
+    Values equal to the current default remove the override. Already billed lines stay.
+    Managers are not given this route; it matches centre rate cards (Super Admin only).
+    """
+    try:
+        from app.models import DoctorDB
+        from app.soft_delete import is_deleted
+    except ImportError:
+        from app.models import DoctorDB
+        from app.soft_delete import is_deleted
+    from sqlalchemy.orm.attributes import flag_modified
+
+    doc = db.query(DoctorDB).filter(DoctorDB.id == doctor_id).first()
+    if not doc or is_deleted(doc):
+        raise HTTPException(status_code=404, detail="Doctor not found")
+    values = [body.firstView, body.additionalView]
+    if any((not isinstance(v, int)) or v < 0 or v > pricing.MAX_RATE_INR for v in values):
+        raise HTTPException(
+            status_code=422,
+            detail=f"Each rate must be a whole number of rupees from 0 to {pricing.MAX_RATE_INR}.",
+        )
+    meta = dict(doc.metadata_ or {})
+    if values == [pricing.DOCTOR_FIRST_STUDY_INR, pricing.DOCTOR_ADDITIONAL_STUDY_INR]:
+        meta.pop("payoutRates", None)
+    else:
+        meta["payoutRates"] = {"firstView": body.firstView, "additionalView": body.additionalView}
+    doc.metadata_ = meta
+    flag_modified(doc, "metadata_")
+    db.commit()
+    billing_svc.logger.info(
+        "Doctor payout changed: doctor=%s by=%s first=%s additional=%s",
+        doctor_id, user.email, body.firstView, body.additionalView,
+    )
+    return _doctor_payout_public(db, doc)
 
 
 class CenterPricingUpdate(BaseModel):

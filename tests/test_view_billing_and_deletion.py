@@ -328,12 +328,12 @@ if inv:
         if "LUMBAR" in (li.get("bodyPart") or ""):
             combo_line_spine = li
     rated_line = line_for(inv, "FAKE PATIENT RATED")
-    check("1 view 6 files pays first rate", one_line and one_line["amount"] == 20 and one_line["quantity"] == 1, one_line)
-    check("2 views 1 file pays first+additional", two_line and two_line["amount"] == 30 and two_line["quantity"] == 2, two_line)
-    check("historical AP/LATERAL is 30", hist_line and hist_line["amount"] == 30, hist_line)
-    check("missing views ignore 5 files", plain_line and plain_line["amount"] == 20 and plain_line["quantity"] == 1, plain_line)
-    check("AP SUPINE priced once", combo_line_chest and combo_line_chest["amount"] == 20, combo_line_chest)
-    check("second study two views are additional rates", combo_line_spine and combo_line_spine["amount"] == 20, combo_line_spine)
+    check("1 view 6 files pays first rate", one_line and one_line["amount"] == 30 and one_line["quantity"] == 1, one_line)
+    check("2 views 1 file pays first+additional", two_line and two_line["amount"] == 45 and two_line["quantity"] == 2, two_line)
+    check("historical AP/LATERAL is 45", hist_line and hist_line["amount"] == 45, hist_line)
+    check("missing views ignore 5 files", plain_line and plain_line["amount"] == 30 and plain_line["quantity"] == 1, plain_line)
+    check("AP SUPINE priced once", combo_line_chest and combo_line_chest["amount"] == 30, combo_line_chest)
+    check("second study two views are additional rates", combo_line_spine and combo_line_spine["amount"] == 30, combo_line_spine)
     check("custom tariff 40+7", rated_line and rated_line["amount"] == 47, rated_line)
 
 north_inv = center_invoice_for(north)
@@ -496,6 +496,9 @@ r = c.post(f"/api/reports/{re_case['id']}/flag-reassign", headers=SA, json={
     "reason": "Fake reassign check",
 })
 check("reassign", r.status_code == 200, r.text)
+ada_id = next(d["id"] for d in docs if d.get("email") == "ada@view.test")
+r = c.put(f"/api/billing/doctor-pricing/{ada_id}", headers=SA, json={"firstView": 80, "additionalView": 40})
+check("raise doctor tariff after sign-off", r.status_code == 200 and r.json()["isCustom"] is True, r.text)
 r = c.post(
     f"/api/reports/{re_case['id']}/studies/{re_case['studies'][0]['id']}/sign",
     headers=BEA,
@@ -504,7 +507,7 @@ r = c.post(
 check("re-sign", r.status_code == 200, r.text)
 bea_inv = doctor_invoice(BEA)
 bea_line = line_for(bea_inv, "FAKE PATIENT REASSIGN") if bea_inv else None
-check("reissued payout keeps 30", bea_line and bea_line["amount"] == 30 and bea_line["quantity"] == 2, bea_line)
+check("reissued payout keeps historical 45", bea_line and bea_line["amount"] == 45 and bea_line["quantity"] == 2, bea_line)
 south_re = center_invoice_for(south)
 re_lines = [li for li in (south_re or {}).get("lineItems") or [] if li["patientName"] == "FAKE PATIENT REASSIGN"]
 check("centre not rebilled on reassign", len(re_lines) == 1 and re_lines[0]["amount"] == 45, re_lines)
@@ -530,6 +533,67 @@ db.close()
 open_doc = doctor_invoice(ADA)
 check("orphan row hidden", line_for(open_doc, "FAKE PATIENT ORPHAN") is None, open_doc)
 check("combo patient still present", line_for(open_doc, "FAKE PATIENT COMBO") is not None)
+
+# Doctor tariff: custom applies to new sign-offs, zero is allowed, default is 30/15.
+fresh = upload(north, ADA, "FAKE PATIENT CUSTOM", [{
+    "bodyPart": "CHEST PA",
+    "views": ["PA"],
+    "images": [],
+    "studyDate": "07-11-2026",
+}])
+add_images(fresh["studies"][0]["id"], 4)
+sign_all(ADA, fresh)
+custom_inv = doctor_invoice(ADA)
+custom_line = line_for(custom_inv, "FAKE PATIENT CUSTOM")
+check("custom doctor tariff ignores image count", custom_line and custom_line["amount"] == 80 and custom_line["quantity"] == 1, custom_line)
+check("centre charge ignores doctor tariff", line_for(center_invoice_for(north), "FAKE PATIENT CUSTOM")["amount"] == 30)
+
+r = c.put(f"/api/billing/doctor-pricing/{ada_id}", headers=SA, json={"firstView": 0, "additionalView": 0})
+check("zero payout allowed", r.status_code == 200 and r.json()["firstView"] == 0 and r.json()["isCustom"] is True, r.text)
+zero_case = upload(north, ADA, "FAKE PATIENT ZERO", [{
+    "bodyPart": "CHEST PA", "views": ["PA"], "images": [], "studyDate": "07-11-2026",
+}])
+sign_all(ADA, zero_case)
+zero_line = line_for(doctor_invoice(ADA), "FAKE PATIENT ZERO")
+check("zero tariff pays zero", zero_line and zero_line["amount"] == 0, zero_line)
+check("zero tariff still charges the centre", line_for(center_invoice_for(north), "FAKE PATIENT ZERO")["amount"] == 30)
+
+r = c.put(f"/api/billing/doctor-pricing/{ada_id}", headers=SA, json={"firstView": 30, "additionalView": 15})
+check("saving the default clears the override", r.status_code == 200 and r.json()["isCustom"] is False, r.text)
+default_case = upload(north, ADA, "FAKE PATIENT DEFAULT", [{
+    "bodyPart": "CHEST PA", "views": ["PA"], "images": [], "studyDate": "07-11-2026",
+}])
+sign_all(ADA, default_case)
+check("cleared tariff uses 30", line_for(doctor_invoice(ADA), "FAKE PATIENT DEFAULT")["amount"] == 30)
+
+r = c.put(f"/api/billing/center-pricing/{south}", headers=SA, json={
+    "centerFirstStudy": 30, "centerAdditionalStudy": 15, "doctorFirstStudy": 22, "doctorAdditionalStudy": 11,
+})
+check("centre keeps its own doctor payout", r.status_code == 200, r.text)
+centre_case = upload(south, ADA, "FAKE PATIENT CENTRE RATE", [{
+    "bodyPart": "CHEST PA", "views": ["PA"], "images": [], "studyDate": "07-11-2026",
+}])
+sign_all(ADA, centre_case)
+check(
+    "stored centre doctor rate is not replaced by 30",
+    line_for(doctor_invoice(ADA), "FAKE PATIENT CENTRE RATE")["amount"] == 22,
+)
+check("negative rate rejected", c.put(
+    f"/api/billing/doctor-pricing/{ada_id}", headers=SA, json={"firstView": -1, "additionalView": 15}
+).status_code == 422)
+r = c.post("/api/managers", headers=SA, json={
+    "name": "Pay Mgr", "email": "paymgr@view.test", "password": "PayMgr123!",
+    "permissions": {"doctors": {"read": True, "write": True}},
+})
+check("create payout manager", r.status_code == 200, r.text)
+MGR, _ = login("paymgr@view.test", "PayMgr123!")
+check("manager cannot set doctor payout", c.put(
+    f"/api/billing/doctor-pricing/{ada_id}", headers=MGR, json={"firstView": 1, "additionalView": 1}
+).status_code == 403)
+check("doctor cannot set doctor payout", c.put(
+    f"/api/billing/doctor-pricing/{ada_id}", headers=ADA, json={"firstView": 1, "additionalView": 1}
+).status_code == 403)
+check("doctor cannot list payout admin", c.get("/api/billing/doctor-pricing", headers=ADA).status_code == 403)
 
 failed = [name for name, ok in results if not ok]
 print(f"\n{len(results) - len(failed)} passed, {len(failed)} failed")
