@@ -11,9 +11,11 @@ from dataclasses import dataclass
 CENTER_FIRST_STUDY_INR = 30
 CENTER_ADDITIONAL_STUDY_INR = 15
 
-# Doctor payouts (radiologist is paid)
-DOCTOR_FIRST_STUDY_INR = 20
-DOCTOR_ADDITIONAL_STUDY_INR = 10
+# Doctor payouts (radiologist is paid) when that doctor has no saved tariff and the
+# centre rate card does not store its own doctor payout. A saved doctor tariff, or
+# a centre card's doctor rates, is used instead. New sign-offs only.
+DOCTOR_FIRST_STUDY_INR = 30
+DOCTOR_ADDITIONAL_STUDY_INR = 15
 
 CURRENCY = "INR"
 
