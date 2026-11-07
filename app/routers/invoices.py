@@ -167,7 +167,9 @@ def get_revenue_summary(
     _user: UserDB = Depends(require_roles("SUPER_ADMIN")),
 ):
     """Super Admin only: monthly revenue from Priority 3 invoice tables (real DB sums)."""
-    return billing_svc.revenue_summary(db, months=months)
+    result = billing_svc.revenue_summary(db, months=months)
+    db.commit()
+    return result
 
 
 @billing_router.get("/periods")
@@ -274,6 +276,8 @@ def list_invoices(
         q = q.filter(InvoiceDB.billing_period == period)
 
     invoices = q.order_by(InvoiceDB.billing_period.desc(), InvoiceDB.party_name.asc()).all()
+    if _sync_deleted_patients(db, invoices):
+        db.commit()
     result = [billing_svc.invoice_to_dict(inv) for inv in invoices]
     if status_filter:
         sf = status_filter.lower()
@@ -291,6 +295,9 @@ def get_invoice(
     if not inv:
         raise HTTPException(status_code=404, detail="Invoice not found")
     _authorize_invoice_read(user, inv, db)
+    if _sync_deleted_patients(db, [inv]):
+        db.commit()
+        db.refresh(inv)
 
     lines = (
         db.query(InvoiceLineItemDB)
@@ -352,6 +359,15 @@ def update_invoice_status(
         raise HTTPException(status_code=404, detail="Invoice not found")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+def _sync_deleted_patients(db: Session, invoices: List[InvoiceDB]) -> bool:
+    """Persist open-invoice deletion adjustments. Paid and locked invoices are skipped."""
+    changed = False
+    for inv in invoices:
+        if billing_svc.sync_open_invoice_deletions(db, inv):
+            changed = True
+    return changed
 
 
 def _authorize_invoice_read(user: UserDB, inv: InvoiceDB, db: Optional[Session] = None) -> None:

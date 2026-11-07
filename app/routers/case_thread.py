@@ -125,10 +125,20 @@ def _comment_to_schema(row: ReportCommentDB) -> dict:
     }
 
 
+def _visible_case(case: CaseDB) -> CaseDB:
+    try:
+        from app.soft_delete import is_deleted
+    except ImportError:
+        from app.soft_delete import is_deleted
+    if is_deleted(case):
+        raise HTTPException(status_code=404, detail="Case/report not found")
+    return case
+
+
 def _resolve_case(db: Session, report_id: str) -> CaseDB:
     case = db.query(CaseDB).filter(CaseDB.id == report_id).first()
     if case:
-        return case
+        return _visible_case(case)
     study = (
         db.query(StudyDB)
         .filter((StudyDB.id == report_id) | (StudyDB.case_id == report_id))
@@ -137,7 +147,7 @@ def _resolve_case(db: Session, report_id: str) -> CaseDB:
     if study:
         case = db.query(CaseDB).filter(CaseDB.id == study.case_id).first()
         if case:
-            return case
+            return _visible_case(case)
     raise HTTPException(status_code=404, detail="Case/report not found")
 
 

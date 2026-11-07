@@ -145,6 +145,9 @@ class StudyUpload(BaseModel):
     """One body-part study with its own view images (create/upload payload)."""
     bodyPart: str
     images: List[str] = []
+    # Explicit projection labels selected in the upload form (AP, LATERAL, ...).
+    # These are not image files. Billing counts this list, not len(images).
+    views: Optional[List[str]] = None
     # This study's own date (DD-MM-YYYY or YYYY-MM-DD); stored in studies.metadata.studyDate
     studyDate: Optional[str] = None
     # HH:MM (24h) when the image was scanned; stored in studies.metadata.studyTime

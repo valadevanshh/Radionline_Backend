@@ -138,10 +138,16 @@ def invoice_includes_recheck(inv: Optional[InvoiceDB]) -> bool:
     return bool(inv is not None and (inv.metadata_ or {}).get("includeRecheck"))
 
 
+# Open-invoice lines whose patient case was deleted. Amounts stay on the row.
+# Paid or locked invoices never use this status; their lines remain the settlement record.
+EXCLUDED_DELETED = "EXCLUDED_DELETED"
+
+
 def counted_lines(inv: Optional[InvoiceDB], lines: List[InvoiceLineItemDB]) -> List[InvoiceLineItemDB]:
+    live = [li for li in lines if line_item_status(li) != EXCLUDED_DELETED]
     if not invoice_includes_recheck(inv):
-        return list(lines)
-    return [li for li in lines if line_item_status(li) != CLAWBACK]
+        return live
+    return [li for li in live if line_item_status(li) != CLAWBACK]
 
 
 def recheck_lines(lines: List[InvoiceLineItemDB]) -> List[InvoiceLineItemDB]:
@@ -186,6 +192,27 @@ def billing_ordered_studies(db: Session, case_id: str) -> List[StudyDB]:
     return studies
 
 
+def _study_view_labels(study) -> List[str]:
+    """Explicit views for one study. Image rows are intentionally not read."""
+    try:
+        from app.view_billing import billable_view_labels
+    except ImportError:
+        from app.view_billing import billable_view_labels
+    meta = getattr(study, "metadata_", None) or {}
+    explicit = meta.get("views") if isinstance(meta, dict) else None
+    return billable_view_labels(
+        body_part=getattr(study, "body_part", "") or "",
+        explicit_views=explicit,
+    )
+
+
+def _priced_description(prefix: str, idx: int, n_studies: int, study, n_views: int) -> str:
+    text = f"{prefix} {idx}/{n_studies}: {study.body_part} ({study.modality or 'X-Ray'})"
+    if n_views > 1:
+        text += f" · {n_views} views"
+    return text
+
+
 def create_billing_on_sign_off(
     db: Session,
     *,
@@ -205,6 +232,13 @@ def create_billing_on_sign_off(
     if not case:
         logger.warning("Billing skipped — case %s not found", case_id)
         return None
+    try:
+        from app.soft_delete import is_deleted
+    except ImportError:
+        from app.soft_delete import is_deleted
+    if is_deleted(case):
+        logger.info("Billing skipped — case %s is deleted", case_id)
+        return {"skipped": True, "reason": "case_deleted", "caseId": case_id}
 
     studies = billing_ordered_studies(db, case_id)
     if not studies:
@@ -280,10 +314,18 @@ def create_billing_on_sign_off(
     doctor_attribution = []
     doctor_total = 0
     n = len(studies)
+    # Price each explicit view in study order. The first view of the case uses
+    # the first-unit rate; every later view uses the additional rate. One line
+    # is still written per study so reassign/recheck stay one payout per study.
+    priced = [(study, _study_view_labels(study)) for study in studies]
+    total_views = sum(len(labels) for _study, labels in priced)
+    view_cursor = 1
 
-    for idx, study in enumerate(studies, start=1):
-        c_amt = rates.center_amount(idx)
-        d_amt = rates.doctor_amount(idx)
+    for idx, (study, labels) in enumerate(priced, start=1):
+        n_views = len(labels)
+        c_amt = sum(rates.center_amount(view_cursor + offset) for offset in range(n_views))
+        d_amt = sum(rates.doctor_amount(view_cursor + offset) for offset in range(n_views))
+        view_cursor += n_views
         doctor_id, doctor_name = _study_doctor(study)
         doctor_inv = _doctor_inv(doctor_id, doctor_name) if doctor_id else None
         # Line ids are VARCHAR(100). study.id already contains case_id, so long body-part
@@ -300,7 +342,7 @@ def create_billing_on_sign_off(
             study_id=study.id,
             study_index=idx,
             service_date=service_date,
-            description=f"Study {idx}/{n}: {study.body_part} ({study.modality or 'X-Ray'})",
+            description=_priced_description("Study", idx, n, study, n_views),
             modality=study.modality,
             body_part=study.body_part,
             patient_number=case.patient_number,
@@ -310,7 +352,7 @@ def create_billing_on_sign_off(
             doctor_id=doctor_id,
             doctor_name=doctor_name,
             unit_amount=c_amt,
-            quantity=1,
+            quantity=n_views,
             amount=c_amt,
             currency=pricing.CURRENCY,
             created_at=ts,
@@ -329,7 +371,7 @@ def create_billing_on_sign_off(
                 study_id=study.id,
                 study_index=idx,
                 service_date=service_date,
-                description=f"Payout study {idx}/{n}: {study.body_part} ({study.modality or 'X-Ray'})",
+                description=_priced_description("Payout study", idx, n, study, n_views),
                 modality=study.modality,
                 body_part=study.body_part,
                 patient_number=case.patient_number,
@@ -339,7 +381,7 @@ def create_billing_on_sign_off(
                 doctor_id=doctor_id,
                 doctor_name=doctor_name,
                 unit_amount=d_amt,
-                quantity=1,
+                quantity=n_views,
                 amount=d_amt,
                 currency=pricing.CURRENCY,
                 created_at=ts,
@@ -364,10 +406,11 @@ def create_billing_on_sign_off(
         "caseId": case_id,
         "period": period,
         "studyCount": n,
+        "viewCount": total_views,
         "centerInvoiceId": center_inv.id,
         "doctorInvoiceId": first_doctor_inv.id if first_doctor_inv else None,
         "doctorInvoiceIds": [inv.id for inv in doctor_invs.values()],
-        "centerTotalAdded": rates.center_total(n),
+        "centerTotalAdded": rates.center_total(total_views),
         "rates": rates.as_dict(),
         "doctorTotalAdded": doctor_total,
         "centerLineIds": center_lines_created,
@@ -384,6 +427,12 @@ def lock_billing_period(db: Session, period: str, locked_by: str) -> dict:
         raise ValueError("period must be YYYY-MM")
 
     ts = now_ist_iso()
+    invoices = db.query(InvoiceDB).filter(InvoiceDB.billing_period == period).all()
+    # Drop deleted-patient lines while the period is still open, then freeze.
+    for inv in invoices:
+        if not inv.locked and (inv.status or "").lower() != "paid":
+            sync_open_invoice_deletions(db, inv)
+
     lock = db.query(BillingPeriodLockDB).filter(BillingPeriodLockDB.period == period).first()
     if not lock:
         lock = BillingPeriodLockDB(period=period, locked=True, locked_at=ts, locked_by=locked_by)
@@ -605,6 +654,174 @@ CLAWBACK = "CLAWBACK"
 def line_item_status(li: InvoiceLineItemDB) -> str:
     raw = (getattr(li, "status", None) or "").strip().upper()
     return raw or ACTIVE
+
+
+def invoice_amounts_immutable(db: Session, inv: Optional[InvoiceDB]) -> bool:
+    """Paid or locked money is a settlement record and is not rewritten."""
+    if inv is None:
+        return True
+    if bool(inv.locked) or is_period_locked(db, inv.billing_period):
+        return True
+    return (inv.status or "").lower() == "paid"
+
+
+def _invoice_lines(db: Session, invoice_id: str) -> List[InvoiceLineItemDB]:
+    return db.query(InvoiceLineItemDB).filter(InvoiceLineItemDB.invoice_id == invoice_id).all()
+
+
+def sync_open_invoice_deletions(db: Session, inv: Optional[InvoiceDB]) -> bool:
+    """On an open invoice, stop counting lines for deleted or missing patient cases.
+
+    Rows and their original amounts are kept (status EXCLUDED_DELETED). Paid and
+    locked invoices are left unchanged. Idempotent.
+    """
+    if inv is None or invoice_amounts_immutable(db, inv):
+        return False
+    try:
+        from app.soft_delete import hidden_patient_case_ids
+    except ImportError:
+        from app.soft_delete import hidden_patient_case_ids
+    lines = _invoice_lines(db, inv.id)
+    hidden = hidden_patient_case_ids(db, [li.case_id for li in lines if li.case_id])
+    changed = False
+    note = "Excluded from this open invoice because the patient case was deleted"
+    for li in lines:
+        if not li.case_id or li.case_id not in hidden:
+            continue
+        if line_item_status(li) == EXCLUDED_DELETED:
+            continue
+        prev = (getattr(li, "status_reason", None) or "").strip()
+        li.status = EXCLUDED_DELETED
+        li.status_reason = f"{prev} | {note}" if prev else note
+        changed = True
+    counted = sum(int(li.amount or 0) for li in counted_lines(inv, lines))
+    if int(inv.total_amount or 0) != counted:
+        inv.total_amount = counted
+        inv.updated_at = now_ist_iso()
+        changed = True
+    if changed:
+        db.flush()
+    return changed
+
+
+def exclude_case_from_open_invoices(db: Session, case_id: str) -> List[str]:
+    """Apply deletion exclusion to every open invoice that mentions this case."""
+    if not case_id:
+        return []
+    inv_ids = {
+        row[0]
+        for row in db.query(InvoiceLineItemDB.invoice_id)
+        .filter(InvoiceLineItemDB.case_id == case_id)
+        .all()
+    }
+    changed = []
+    for inv_id in inv_ids:
+        inv = db.query(InvoiceDB).filter(InvoiceDB.id == inv_id).first()
+        if inv and sync_open_invoice_deletions(db, inv):
+            changed.append(inv.id)
+    return changed
+
+
+def preview_open_invoice_deletion_adjustments(db: Session) -> List[dict]:
+    """Read-only. What an open-invoice read would exclude, and what paid/locked rows keep.
+
+    Does not mark lines or change totals. Does not reprice stored amounts.
+    """
+    try:
+        from app.soft_delete import hidden_patient_case_ids
+    except ImportError:
+        from app.soft_delete import hidden_patient_case_ids
+    preview = []
+    for inv in db.query(InvoiceDB).order_by(InvoiceDB.billing_period.asc(), InvoiceDB.id.asc()).all():
+        lines = _invoice_lines(db, inv.id)
+        hidden = hidden_patient_case_ids(db, [li.case_id for li in lines if li.case_id])
+        affected = [
+            li for li in lines
+            if li.case_id in hidden and line_item_status(li) != EXCLUDED_DELETED
+        ]
+        if not affected:
+            continue
+        immutable = invoice_amounts_immutable(db, inv)
+        drop_amount = sum(int(li.amount or 0) for li in affected)
+        if immutable:
+            action = "preserve"
+            resulting = int(inv.total_amount or 0)
+        else:
+            action = "exclude_on_read"
+            pretend = [
+                li for li in lines
+                if li not in affected and line_item_status(li) != EXCLUDED_DELETED
+            ]
+            resulting = sum(int(li.amount or 0) for li in counted_lines(inv, pretend))
+        preview.append({
+            "invoiceId": inv.id,
+            "partyType": inv.party_type,
+            "partyId": inv.party_id,
+            "billingPeriod": inv.billing_period,
+            "storedStatus": inv.status,
+            "locked": bool(inv.locked),
+            "action": action,
+            "storedTotal": int(inv.total_amount or 0),
+            "resultingTotal": resulting,
+            "excludedAmount": 0 if immutable else drop_amount,
+            "lines": [
+                {
+                    "lineId": li.id,
+                    "caseId": li.case_id,
+                    "amount": int(li.amount or 0),
+                    "status": line_item_status(li),
+                    "bodyPart": li.body_part,
+                }
+                for li in affected
+            ],
+        })
+    return preview
+
+
+def preview_view_count_deltas(db: Session) -> List[dict]:
+    """Read-only comparison of stored line amounts with today's view-count pricing.
+
+    Nothing is written. Already billed lines keep the amount they were signed at.
+    """
+    out = []
+    for inv in db.query(InvoiceDB).order_by(InvoiceDB.id.asc()).all():
+        if invoice_amounts_immutable(db, inv):
+            continue
+        lines = [
+            li for li in _invoice_lines(db, inv.id)
+            if line_item_status(li) == ACTIVE and int(li.amount or 0) > 0 and li.case_id
+        ]
+        by_case = {}
+        for li in lines:
+            by_case.setdefault(li.case_id, []).append(li)
+        for case_id, case_lines in by_case.items():
+            case = db.query(CaseDB).filter(CaseDB.id == case_id).first()
+            if case is None or getattr(case, "deleted_at", None):
+                continue
+            studies = billing_ordered_studies(db, case_id)
+            rates = rates_for_center(db, case.radiology_center_id)
+            amount_for = rates.center_amount if inv.party_type == "center" else rates.doctor_amount
+            cursor = 1
+            expected = {}
+            for study in studies:
+                n_views = len(_study_view_labels(study))
+                expected[study.id] = sum(amount_for(cursor + offset) for offset in range(n_views))
+                cursor += n_views
+            for li in case_lines:
+                exp = expected.get(li.study_id)
+                if exp is None or int(li.amount or 0) == int(exp):
+                    continue
+                out.append({
+                    "invoiceId": inv.id,
+                    "partyType": inv.party_type,
+                    "lineId": li.id,
+                    "caseId": case_id,
+                    "bodyPart": li.body_part,
+                    "storedAmount": int(li.amount or 0),
+                    "hypotheticalAmount": int(exp),
+                    "applied": False,
+                })
+    return out
 
 
 def _doctor_lines_for_case(db: Session, case_id: str) -> List[InvoiceLineItemDB]:
@@ -928,6 +1145,14 @@ def ensure_doctor_payout_for_signer(
         if c_line and not doctor_inv.linked_invoice_id:
             doctor_inv.linked_invoice_id = c_line.invoice_id
         amt = _reissue_amount(db, case, study_lines, idx)
+        prior = sorted(
+            (li for li in study_lines
+             if int(li.amount or 0) > 0 and not getattr(li, "offsets_line_item_id", None)),
+            key=lambda li: li.created_at or "",
+        )
+        # Keep the original view quantity. The rupee amount is still the amount
+        # that original payout was billed at (_reissue_amount).
+        qty = int(prior[0].quantity or 1) if prior else 1
         line_id = _bounded_id(f"ili-d-{case_id}-{idx}-r{stamp}", "ili-d")
         db.add(
             InvoiceLineItemDB(
@@ -941,7 +1166,7 @@ def ensure_doctor_payout_for_signer(
                 service_date=(c_line.service_date if c_line else None)
                 or (case.study_date if case else None)
                 or now_ist().strftime("%d-%m-%Y"),
-                description=f"Payout study {idx}/{n}: {study.body_part} ({study.modality or 'X-Ray'})",
+                description=_priced_description("Payout study", idx, n, study, qty),
                 modality=study.modality,
                 body_part=study.body_part,
                 patient_number=case.patient_number if case else None,
@@ -951,7 +1176,7 @@ def ensure_doctor_payout_for_signer(
                 doctor_id=doctor_id,
                 doctor_name=doctor_name,
                 unit_amount=amt,
-                quantity=1,
+                quantity=qty,
                 amount=amt,
                 currency=pricing.CURRENCY,
                 created_at=ts,
@@ -1004,6 +1229,8 @@ def revenue_summary(db: Session, months: int = 6) -> dict:
 
     def summarize_period(period: str) -> dict:
         invoices = db.query(InvoiceDB).filter(InvoiceDB.billing_period == period).all()
+        for inv in invoices:
+            sync_open_invoice_deletions(db, inv)
         center_billing = 0
         doctor_payouts = 0
         center_paid = 0

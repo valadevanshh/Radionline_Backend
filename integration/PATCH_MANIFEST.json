@@ -1,0 +1,25 @@
+{
+  "backendBaseline": "6c704539148a1e8a5d0778af56462ce569ff46f7",
+  "frontendBaseline": "9f72dbc732d3ff7b2e7ab19f3876c5b19e214710",
+  "lineEndings": "Patches are LF, matching the git blobs. The attached sanitized tar stores the same source with CRLF; do not apply these patches onto the CRLF tar bytes. Apply them to the Darling git checkouts of the commits above.",
+  "patches": {
+    "backend": {
+      "file": "integration/radionline-backend.patch",
+      "sha256": "b50147ded9db0286b119047f5f9cf2d4e0d7c50fe59f883efa81032ded5578b8",
+      "bytes": 71940,
+      "apply": "git apply integration/radionline-backend.patch   # from the backend repo at 6c70453"
+    },
+    "frontend": {
+      "file": "integration/radionline-frontend.patch",
+      "sha256": "8d1330a192a02b32d7a63c9479ca9813e7454fbcdb44988be0717efb6f1544ef",
+      "bytes": 11841,
+      "apply": "patch -p1 < integration/radionline-frontend.patch   # from the frontend repo at 9f72dbc"
+    }
+  },
+  "notInPatch": [
+    "No schema migration.",
+    "Stored line amounts are not repriced. View-count pricing starts at the next sign-off.",
+    "Paid or locked invoices are not changed when a patient is deleted.",
+    "Prepaid wallet CHARGE rows are not credited."
+  ]
+}
