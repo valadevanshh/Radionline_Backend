@@ -370,11 +370,15 @@ def get_my_work(
 
     cases = db.query(CaseDB).filter(CaseDB.id.in_(list(by_case.keys()))).all()
     case_map = {c.id: c for c in cases}
+    try:
+        from app.soft_delete import is_deleted
+    except ImportError:
+        from app.soft_delete import is_deleted
 
     items_meta = []
     for case_id, study_list in by_case.items():
         case = case_map.get(case_id)
-        if not case:
+        if not case or is_deleted(case):
             continue
         if center_id and case.radiology_center_id != center_id:
             continue
@@ -693,9 +697,21 @@ async def save_report_core(report_in: ReportCreate, db: Session):
 
     # Prefer per-study uploads (body part + its views). Fall back to flat uploadedImages.
     raw_study_uploads = getattr(report_in, "studyUploads", None) or []
-    study_image_map: List[Tuple[str, List]] = []
+    study_image_map: List[Tuple[str, List, Optional[List[str]]]] = []
     study_date_map: dict = {}
     study_time_map: dict = {}
+
+    def _clean_view_labels(raw) -> Optional[List[str]]:
+        if not raw:
+            return None
+        out: List[str] = []
+        for item in raw:
+            if isinstance(item, str) and item.strip():
+                out.append(item.strip()[:80])
+            if len(out) >= 30:
+                break
+        return out or None
+
     if raw_study_uploads:
         for su in raw_study_uploads:
             bp = (getattr(su, "bodyPart", None) or "").strip()
@@ -707,7 +723,7 @@ async def save_report_core(report_in: ReportCreate, db: Session):
                 entity_id=rep_id,
                 subfolder="uploads",
             )
-            study_image_map.append((bp, imgs))
+            study_image_map.append((bp, imgs, _clean_view_labels(getattr(su, "views", None))))
             st_raw = (getattr(su, "studyTime", None) or "").strip()
             if st_raw:
                 import re as _re
@@ -727,9 +743,9 @@ async def save_report_core(report_in: ReportCreate, db: Session):
         # cases.study_date = first study's date (back-compat for lists, billing, filters)
         if study_image_map and study_date_map.get(study_image_map[0][0]):
             report_in.studyDate = study_date_map[study_image_map[0][0]]
-        body_parts_resolved = [bp for bp, _ in study_image_map] or (report_in.bodyParts or ["CHEST PA/AP"])
+        body_parts_resolved = [bp for bp, _imgs, _views in study_image_map] or (report_in.bodyParts or ["CHEST PA/AP"])
         uploaded_images = []
-        for _, imgs in study_image_map:
+        for _bp, imgs, _views in study_image_map:
             for u in imgs:
                 if u not in uploaded_images:
                     uploaded_images.append(u)
@@ -742,7 +758,7 @@ async def save_report_core(report_in: ReportCreate, db: Session):
             entity_id=rep_id,
             subfolder="uploads",
         )
-        study_image_map = [(bp, list(uploaded_images)) for bp in body_parts_resolved]
+        study_image_map = [(bp, list(uploaded_images), None) for bp in body_parts_resolved]
 
     clinical_history_images = file_storage.materialize_media_list(
         getattr(report_in, "clinicalHistoryImages", None),
@@ -856,7 +872,7 @@ async def save_report_core(report_in: ReportCreate, db: Session):
         else None
     )
 
-    for position, (bp, study_imgs) in enumerate(study_image_map, start=1):
+    for position, (bp, study_imgs, view_labels) in enumerate(study_image_map, start=1):
         sanitized_bp = bp.replace('/', '-').replace(' ', '-').lower()
         study_id = f"{rep_id}-{sanitized_bp}"
         if len(study_id) > 100:
@@ -888,6 +904,7 @@ async def save_report_core(report_in: ReportCreate, db: Session):
                 created_at=created_at,
                 metadata_={
                     **meta_payload,
+                    **({"views": view_labels} if view_labels else {}),
                     **({"studyDate": study_date_map[bp]} if study_date_map.get(bp) else {}),
                     **({"studyTime": study_time_map[bp]} if study_time_map.get(bp) else {}),
                 },
@@ -920,12 +937,14 @@ async def save_report_core(report_in: ReportCreate, db: Session):
         else:
             study_obj.is_urgent = is_urg
             study_obj.modality = study_modality
-            if study_date_map.get(bp) or study_time_map.get(bp):
+            if study_date_map.get(bp) or study_time_map.get(bp) or view_labels:
                 smeta = dict(study_obj.metadata_ or {})
                 if study_date_map.get(bp):
                     smeta["studyDate"] = study_date_map[bp]
                 if study_time_map.get(bp):
                     smeta["studyTime"] = study_time_map[bp]
+                if view_labels:
+                    smeta["views"] = view_labels
                 study_obj.metadata_ = smeta
             db.commit()
 

@@ -7,7 +7,9 @@ os.environ["ENVIRONMENT"] = "development"
 os.environ["FILE_STORAGE_TRANSPORT"] = "local"
 os.environ["FILE_STORAGE_ROOT"] = os.path.join(TMP, "files")
 os.environ["JWT_SECRET"] = "test-secret"
-BACKEND = r"C:\Project\Radionline\Radionline_Backend"
+_HERE = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+_WIN = r"C:\Project\Radionline\Radionline_Backend"
+BACKEND = _WIN if os.path.isdir(_WIN) else _HERE
 sys.path.insert(0, BACKEND)
 os.chdir(TMP)  # ./radionline.db lands in the temp dir
 

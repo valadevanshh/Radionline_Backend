@@ -400,6 +400,12 @@ def resolve_case_and_study(db: Session, case_id: str, study_id: str):
             study_id = study.id
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
+    try:
+        from app.soft_delete import is_deleted
+    except ImportError:
+        from app.soft_delete import is_deleted
+    if is_deleted(case):
+        raise HTTPException(status_code=404, detail="Case not found")
     if not study:
         study = (
             db.query(StudyDB)
@@ -613,6 +619,10 @@ def get_my_partial_cases(
     db: Session = Depends(get_db),
     current_user: UserDB = Depends(require_roles("DOCTOR")),
 ):
+    try:
+        from app.soft_delete import is_deleted
+    except ImportError:
+        from app.soft_delete import is_deleted
     keys = {str(k) for k in _doctor_claim_identity_keys(db, current_user)}
     claimed = db.query(StudyDB).filter(StudyDB.claimed_by.in_(list(keys))).all()
     case_ids = {s.case_id for s in claimed}
@@ -622,7 +632,7 @@ def get_my_partial_cases(
         if not is_partial_case(studies):
             continue
         case = db.query(CaseDB).filter(CaseDB.id == case_id).first()
-        if not case:
+        if not case or is_deleted(case):
             continue
         signed, total = signed_count(studies)
         items.append({

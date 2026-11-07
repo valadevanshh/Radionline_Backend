@@ -8,7 +8,9 @@ os.environ.update({
     "JWT_SECRET": "e2e-local-secret-e2e-local-secret-123",
     "CORS_ORIGINS": "http://127.0.0.1:3011,http://localhost:3011",
 })
-sys.path.insert(0, r"C:\Project\Radionline\Radionline_Backend")
+_HERE = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+_WIN = r"C:\Project\Radionline\Radionline_Backend"
+sys.path.insert(0, _WIN if os.path.isdir(_WIN) else _HERE)
 os.chdir(TMP)
 from app.database import engine, Base
 assert engine.dialect.name == "sqlite", engine.url
