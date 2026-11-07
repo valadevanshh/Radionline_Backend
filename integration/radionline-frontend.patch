@@ -1,0 +1,205 @@
+diff -ruN -x node_modules -x .next -x package-lock.json -x tsconfig.tsbuildinfo -x next-env.d.ts a/app/dashboard/center-invoices/page.tsx b/app/dashboard/center-invoices/page.tsx
+--- a/app/dashboard/center-invoices/page.tsx	2026-11-07 18:42:39.352009808 +0000
++++ b/app/dashboard/center-invoices/page.tsx	2026-11-07 18:42:47.272004463 +0000
+@@ -125,7 +125,7 @@
+             <span>Center Invoices & Billing</span>
+           </div>
+         }
+-        subtitle={`Monthly invoices (IST) · ₹${pricing?.center?.firstStudy ?? 30} first · ₹${pricing?.center?.additionalStudy ?? 15} additional · ${formatPeriodLabel(periodFilter)}`}
++        subtitle={`Monthly invoices (IST) · ₹${pricing?.center?.firstStudy ?? 30} first · ₹${pricing?.center?.additionalStudy ?? 15} additional per view · ${formatPeriodLabel(periodFilter)}`}
+         actions={
+           <div className="flex items-center gap-2 flex-wrap">
+             <select
+diff -ruN -x node_modules -x .next -x package-lock.json -x tsconfig.tsbuildinfo -x next-env.d.ts a/app/dashboard/doctor-earnings/page.tsx b/app/dashboard/doctor-earnings/page.tsx
+--- a/app/dashboard/doctor-earnings/page.tsx	2026-11-07 18:42:39.348009810 +0000
++++ b/app/dashboard/doctor-earnings/page.tsx	2026-11-07 18:42:47.020004621 +0000
+@@ -95,7 +95,7 @@
+               <p className="text-[11px] text-slate-500 font-mono">
+                 Monthly payouts (IST) · {formatPeriodLabel(periodFilter)} ·{' '}
+                 {pricing?.variesByCenter ? 'Default: ' : ''}₹{pricing?.doctor?.firstStudy ?? 20} first · ₹
+-                {pricing?.doctor?.additionalStudy ?? 10} additional
++                {pricing?.doctor?.additionalStudy ?? 10} additional per view
+               </p>
+             </div>
+           </div>
+diff -ruN -x node_modules -x .next -x package-lock.json -x tsconfig.tsbuildinfo -x next-env.d.ts a/app/dashboard/invoices/page.tsx b/app/dashboard/invoices/page.tsx
+--- a/app/dashboard/invoices/page.tsx	2026-11-07 18:42:39.352009808 +0000
++++ b/app/dashboard/invoices/page.tsx	2026-11-07 18:42:47.856004098 +0000
+@@ -229,7 +229,7 @@
+                 Monthly settlement (IST) ·{' '}
+                 {pricing?.variesByCenter ? 'Default: ' : ''}
+                 Center ₹{pricing?.center?.firstStudy ?? 30}/+{pricing?.center?.additionalStudy ?? 15} · Doctor ₹
+-                {pricing?.doctor?.firstStudy ?? 20}/+{pricing?.doctor?.additionalStudy ?? 10}
++                {pricing?.doctor?.firstStudy ?? 20}/+{pricing?.doctor?.additionalStudy ?? 10} per view
+               </p>
+             </div>
+           </div>
+diff -ruN -x node_modules -x .next -x package-lock.json -x tsconfig.tsbuildinfo -x next-env.d.ts a/app/dashboard/radiology/page.tsx b/app/dashboard/radiology/page.tsx
+--- a/app/dashboard/radiology/page.tsx	2026-11-07 18:42:39.348009810 +0000
++++ b/app/dashboard/radiology/page.tsx	2026-11-07 18:42:48.496003702 +0000
+@@ -361,7 +361,7 @@
+                       <div className="col-resizer" onMouseDown={(e) => startResizing('headerBanner', e.clientX, widths.headerBanner)} />
+                     </th>
+                     {isSuperAdmin && (
+-                      <th title="Pricing (first / each additional study)" style={{ width: widths.pricing, position: 'relative' }}>
++                      <th title="Pricing (first / each additional view)" style={{ width: widths.pricing, position: 'relative' }}>
+                         <span>Pricing</span>
+                         <div className="col-resizer" onMouseDown={(e) => startResizing('pricing', e.clientX, widths.pricing)} />
+                       </th>
+@@ -422,7 +422,7 @@
+                         const p = pricingById[c.id];
+                         const r = p || defaultRates;
+                         return (
+-                          <td className="p-3.5" title="Centre charge and doctor payout: first study / each additional study">
++                          <td className="p-3.5" title="Centre charge and doctor payout: first view / each additional view">
+                             {r ? (
+                               <button
+                                 type="button"
+diff -ruN -x node_modules -x .next -x package-lock.json -x tsconfig.tsbuildinfo -x next-env.d.ts a/components/CenterPricingModal.tsx b/components/CenterPricingModal.tsx
+--- a/components/CenterPricingModal.tsx	2026-11-07 18:42:39.344009813 +0000
++++ b/components/CenterPricingModal.tsx	2026-11-07 18:42:46.772004778 +0000
+@@ -31,7 +31,7 @@
+   onSaved: (p: CenterPricing) => void;
+ }
+ 
+-/** Super Admin: edit one centre's charge and doctor payout (first / each additional study). */
++/** Super Admin: edit one centre's charge and doctor payout (first / each additional view). */
+ export default function CenterPricingModal({ pricing, defaults, onClose, onSaved }: CenterPricingModalProps) {
+   const [values, setValues] = useState<Values | null>(null);
+   const [saving, setSaving] = useState(false);
+@@ -128,20 +128,20 @@
+         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+           <fieldset className="rounded-lg border border-slate-200 p-3 space-y-3">
+             <legend className="px-1 text-[11px] font-bold uppercase tracking-wider text-slate-500">Centre is charged</legend>
+-            {field('centerFirst', 'First study')}
+-            {field('centerAdditional', 'Each additional study')}
++            {field('centerFirst', 'First view')}
++            {field('centerAdditional', 'Each additional view')}
+           </fieldset>
+           <fieldset className="rounded-lg border border-slate-200 p-3 space-y-3">
+             <legend className="px-1 text-[11px] font-bold uppercase tracking-wider text-slate-500">Doctor is paid</legend>
+-            {field('doctorFirst', 'First study')}
+-            {field('doctorAdditional', 'Each additional study')}
++            {field('doctorFirst', 'First view')}
++            {field('doctorAdditional', 'Each additional view')}
+           </fieldset>
+         </div>
+ 
+         <div className="text-xs text-slate-600 space-y-1">
+           {example && (
+             <p data-testid="pricing-example">
+-              A 3-study case: centre {RS}{example.center}, doctor {RS}{example.doctor}.
++              A 3-view case: centre {RS}{example.center}, doctor {RS}{example.doctor}.
+             </p>
+           )}
+           {defaults && (
+diff -ruN -x node_modules -x .next -x package-lock.json -x tsconfig.tsbuildinfo -x next-env.d.ts a/components/NewXRayReportModal.tsx b/components/NewXRayReportModal.tsx
+--- a/components/NewXRayReportModal.tsx	2026-11-07 18:42:39.340009816 +0000
++++ b/components/NewXRayReportModal.tsx	2026-11-07 18:42:44.980005932 +0000
+@@ -27,11 +27,12 @@
+ import { BODY_PARTS_DATA, VIEWS_DATA } from '@/lib/body-parts-data';
+ import Autocomplete from '@/components/ui/Autocomplete';
+ import { viewsForBodyPart } from '@/lib/body-view-map';
++import { explicitStudyViews } from '@/lib/study-views';
+ import { cleanDr, hasDrPrefix, stripDr, withDr, DR_HINT } from '@/lib/doctor-name';
+ 
+ /** Payload handed to the page on create (same contract as before, plus the case id the files were stored under). */
+ export type NewCasePayload = Omit<XRayReport, 'createdAt'> & {
+-  studyUploads?: { bodyPart: string; images: string[]; studyDate?: string; studyTime?: string }[];
++  studyUploads?: { bodyPart: string; images: string[]; views?: string[]; studyDate?: string; studyTime?: string }[];
+ };
+ 
+ interface NewXRayReportModalProps {
+@@ -734,7 +735,7 @@
+       const done = { n: 0 };
+       if (total > 0) setUploadPct(0);
+ 
+-      const studyUploads: { bodyPart: string; images: string[]; studyDate?: string; studyTime?: string }[] = [];
++      const studyUploads: { bodyPart: string; images: string[]; views?: string[]; studyDate?: string; studyTime?: string }[] = [];
+       for (const s of readyStudies) {
+         const paths = await uploadAll(
+           s.views,
+@@ -756,7 +757,13 @@
+           done,
+           total || 1,
+         );
+-        studyUploads.push({ bodyPart: resolvedBodyPart(s), images: paths, studyDate: isoToDDMMYYYY(s.studyDate), studyTime: s.studyTime || undefined });
++        studyUploads.push({
++          bodyPart: resolvedBodyPart(s),
++          images: paths,
++          views: explicitStudyViews(s),
++          studyDate: isoToDDMMYYYY(s.studyDate),
++          studyTime: s.studyTime || undefined,
++        });
+       }
+       const slipPaths = await uploadAll(
+         slips,
+diff -ruN -x node_modules -x .next -x package-lock.json -x tsconfig.tsbuildinfo -x next-env.d.ts a/lib/api-client.ts b/lib/api-client.ts
+--- a/lib/api-client.ts	2026-11-07 18:42:39.344009813 +0000
++++ b/lib/api-client.ts	2026-11-07 18:42:45.612005522 +0000
+@@ -556,7 +556,7 @@
+ 
+   async saveReport(
+     report: Partial<XRayReport> & {
+-      studyUploads?: { bodyPart: string; images: string[]; studyDate?: string; studyTime?: string }[];
++      studyUploads?: { bodyPart: string; images: string[]; views?: string[]; studyDate?: string; studyTime?: string }[];
+     },
+   ) {
+     return fetchJson<XRayReport & Partial<PendingApprovalResult>>('/reports', {
+diff -ruN -x node_modules -x .next -x package-lock.json -x tsconfig.tsbuildinfo -x next-env.d.ts a/lib/study-views.test.ts b/lib/study-views.test.ts
+--- a/lib/study-views.test.ts	1970-01-01 00:00:00.000000000 +0000
++++ b/lib/study-views.test.ts	2026-11-07 18:42:43.120007170 +0000
+@@ -0,0 +1,25 @@
++import assert from 'node:assert/strict';
++import test from 'node:test';
++import { explicitStudyViews } from './study-views';
++
++test('one selected view is one view no matter how many files were picked', () => {
++  const views = explicitStudyViews({ viewList: ['PA'] });
++  assert.deepEqual(views, ['PA']);
++  assert.equal(views.length, 1);
++});
++
++test('AP and LATERAL are two views even when a single file was uploaded', () => {
++  assert.deepEqual(explicitStudyViews({ viewList: ['AP', 'LATERAL'] }), ['AP', 'LATERAL']);
++});
++
++test('AP/LAT is kept as the selected combination label', () => {
++  assert.deepEqual(explicitStudyViews({ viewList: ['AP/LAT'] }), ['AP/LAT']);
++});
++
++test('a legacy single view field is sent when the multi-select is empty', () => {
++  assert.deepEqual(explicitStudyViews({ viewList: [], view: 'AP/LATERAL' }), ['AP/LATERAL']);
++});
++
++test('no selected view sends nothing for the server to parse from the study name', () => {
++  assert.deepEqual(explicitStudyViews({ viewList: [], view: '  ' }), []);
++});
+diff -ruN -x node_modules -x .next -x package-lock.json -x tsconfig.tsbuildinfo -x next-env.d.ts a/lib/study-views.ts b/lib/study-views.ts
+--- a/lib/study-views.ts	1970-01-01 00:00:00.000000000 +0000
++++ b/lib/study-views.ts	2026-11-07 18:42:41.608008209 +0000
+@@ -0,0 +1,12 @@
++/** Explicit projection labels chosen on the upload form.
++
++Image files are not views. Billing uses this list, not how many files were uploaded.
++*/
++export function explicitStudyViews(study: { viewList?: string[] | null; view?: string | null }): string[] {
++  const list = Array.isArray(study.viewList)
++    ? study.viewList.map((v) => String(v || '').trim()).filter(Boolean)
++    : [];
++  if (list.length) return list;
++  const one = String(study.view || '').trim();
++  return one ? [one] : [];
++}
+diff -ruN -x node_modules -x .next -x package-lock.json -x tsconfig.tsbuildinfo -x next-env.d.ts a/package.json b/package.json
+--- a/package.json	2026-11-07 18:42:39.340009816 +0000
++++ b/package.json	2026-11-07 18:42:43.596006851 +0000
+@@ -7,7 +7,7 @@
+                     "build":  "next build",
+                     "start":  "next start",
+                     "lint":  "next lint",
+-                    "test":  "tsx --test lib/template-match.test.ts"
++                    "test":  "tsx --test lib/template-match.test.ts lib/study-views.test.ts"
+                 },
+     "dependencies":  {
+                          "exceljs":  "^4.4.0",

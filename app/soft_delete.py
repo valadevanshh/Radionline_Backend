@@ -166,6 +166,34 @@ def soft_delete_center_and_orphaned_logins(db: Session, center_id: str) -> None:
             mark_deleted(u)
 
 
+def hidden_patient_case_ids(db: Session, case_ids) -> set:
+    """Case ids that must leave live doctor lists and open invoices.
+
+    A soft-deleted case, or an id with no case row (orphan line), is hidden.
+    The case row itself is not removed.
+    """
+    ids = []
+    seen = set()
+    for raw in case_ids or []:
+        if not raw or raw in seen:
+            continue
+        seen.add(raw)
+        ids.append(raw)
+    if not ids:
+        return set()
+    try:
+        from app.models import CaseDB
+    except ImportError:
+        from app.models import CaseDB
+    rows = db.query(CaseDB.id, CaseDB.deleted_at).filter(CaseDB.id.in_(ids)).all()
+    found = {row[0]: row[1] for row in rows}
+    hidden = set()
+    for cid in ids:
+        if cid not in found or found[cid]:
+            hidden.add(cid)
+    return hidden
+
+
 def soft_delete_case(db: Session, case_id: str) -> dict:
     """Mark the patient case deleted. Studies/files kept for history; lists hide it."""
     try:
@@ -182,6 +210,13 @@ def soft_delete_case(db: Session, case_id: str) -> dict:
     if legacy is not None and hasattr(legacy, "deleted_at"):
         # legacy table may not have the column; ignore if missing
         pass
+    if case is not None:
+        # Open centre/doctor invoices drop this patient's lines. Paid/locked stay.
+        try:
+            from app.billing import exclude_case_from_open_invoices
+        except ImportError:
+            from app.billing import exclude_case_from_open_invoices
+        exclude_case_from_open_invoices(db, case_id)
     return counts
 
 

@@ -30,8 +30,20 @@ def list_my_notifications(
     current_user: UserDB = Depends(get_current_user),
 ):
     q = db.query(UserNotificationDB).filter(UserNotificationDB.user_id == current_user.id)
-    rows = q.order_by(UserNotificationDB.id.desc()).limit(LIST_LIMIT).all()
-    unread = q.filter(UserNotificationDB.read_at.is_(None)).count()
+    if current_user.role == "DOCTOR":
+        # Over-fetch so deleted-patient notices don't crowd out other recent items.
+        rows = q.order_by(UserNotificationDB.id.desc()).limit(LIST_LIMIT * 4).all()
+        try:
+            from app.soft_delete import hidden_patient_case_ids
+        except ImportError:
+            from app.soft_delete import hidden_patient_case_ids
+        hidden = hidden_patient_case_ids(db, [r.case_id for r in rows if r.case_id])
+        rows = [r for r in rows if not r.case_id or r.case_id not in hidden]
+        unread = sum(1 for r in rows if not r.read_at)
+        rows = rows[:LIST_LIMIT]
+    else:
+        rows = q.order_by(UserNotificationDB.id.desc()).limit(LIST_LIMIT).all()
+        unread = q.filter(UserNotificationDB.read_at.is_(None)).count()
     return {"items": [to_schema(r) for r in rows], "unread": unread}
 
 
