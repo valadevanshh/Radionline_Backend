@@ -197,6 +197,24 @@ def get_template(
     return db_to_schema(tmpl)
 
 
+def _resolve_doctor(db: Session, doctor_id: Optional[str]):
+    """Return (id, display name) for an active doctor, or raise 422."""
+    doc_id = (doctor_id or "").strip()
+    if not doc_id:
+        raise HTTPException(status_code=422, detail="Please select the doctor this template belongs to")
+    doc = db.query(DoctorDB).filter(DoctorDB.id == doc_id).first()
+    if not doc:
+        raise HTTPException(status_code=422, detail="Selected doctor was not found")
+    try:
+        from app.soft_delete import is_deleted
+        if is_deleted(doc):
+            raise HTTPException(status_code=422, detail="Selected doctor is no longer active")
+    except ImportError:
+        pass
+    name = getattr(doc, "full_name", None) or getattr(doc, "name", None) or doc.email or doc_id
+    return str(doc.id), name
+
+
 @router.post("", response_model=TemplateResponse)
 async def save_template(
     tmpl_in: TemplateCreate,
@@ -204,12 +222,49 @@ async def save_template(
     current_user: UserDB = Depends(get_current_user),
 ):
     """Create / edit a template.
-    Strictly limited to doctors only."""
-    if current_user.role != "DOCTOR":
-        raise HTTPException(
-            status_code=403,
-            detail="Template creation is limited to doctors only",
+    - DOCTOR: own templates only.
+    - SUPER_ADMIN: on behalf of any doctor (doctorId required), saved directly.
+    - MANAGER (needs Doctors → write): on behalf of a doctor, staged for Super Admin approval (HTTP 202)."""
+    role = current_user.role
+    if role == "DOCTOR":
+        return save_template_core(tmpl_in, db, current_user)
+    if role not in ("SUPER_ADMIN", "MANAGER"):
+        raise HTTPException(status_code=403, detail="You are not allowed to create or edit templates")
+
+    try:
+        from app.manager_access import require_manager_perm
+    except ImportError:
+        from app.manager_access import require_manager_perm
+    require_manager_perm(current_user, "doctors", "write")
+
+    if not (tmpl_in.title or "").strip():
+        raise HTTPException(status_code=422, detail="Template name is required")
+    if not (tmpl_in.modality or "").strip():
+        raise HTTPException(status_code=422, detail="Modality is required")
+    doc_id, doc_name = _resolve_doctor(db, tmpl_in.doctorId)
+    tmpl_in.doctorId = doc_id
+    tmpl_in.doctorName = doc_name
+
+    exists = bool(tmpl_in.id) and db.query(TemplateDB).filter(TemplateDB.id == tmpl_in.id).first() is not None
+    if tmpl_in.id and not exists:
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    if role == "MANAGER":
+        try:
+            from app.routers.approvals import create_pending_approval, announce_pending_approval, pending_response
+        except ImportError:
+            from app.routers.approvals import create_pending_approval, announce_pending_approval, pending_response
+        payload = tmpl_in.model_dump() if hasattr(tmpl_in, "model_dump") else tmpl_in.dict()
+        appr = create_pending_approval(
+            db, current_user, action_type="UPDATE_TEMPLATE" if exists else "CREATE_TEMPLATE", entity_type="template",
+            entity_id=tmpl_in.id if exists else None, payload=payload,
         )
+        data = await announce_pending_approval(db, appr, current_user)
+        return pending_response(
+            data,
+            ("Template edit" if exists else "New template") + f" for {doc_name} sent to the Super Admin for approval.",
+        )
+
     return save_template_core(tmpl_in, db, current_user)
 
 
@@ -248,9 +303,11 @@ def save_template_core(
         existing.center_id = tmpl_in.centerId
         existing.center_name = tmpl_in.centerName
         existing.modality = tmpl_in.modality
-        if not getattr(existing, "doctor_id", None) and creator_doctor_id:
+        # Admin / approval path may (re)assign the owning doctor; a doctor only claims unowned rows
+        on_behalf = not current_user or current_user.role != "DOCTOR"
+        if creator_doctor_id and (on_behalf or not getattr(existing, "doctor_id", None)):
             existing.doctor_id = creator_doctor_id
-        if not getattr(existing, "doctor_name", None) and creator_doctor_name:
+        if creator_doctor_name and (on_behalf or not getattr(existing, "doctor_name", None)):
             existing.doctor_name = creator_doctor_name
 
         meta_payload = {
@@ -314,6 +371,11 @@ async def delete_template(
         return None
 
     if current_user.role == "MANAGER":
+        try:
+            from app.manager_access import require_manager_perm
+        except ImportError:
+            from app.manager_access import require_manager_perm
+        require_manager_perm(current_user, "doctors", "write")
         try:
             from app.routers.approvals import (
                 create_pending_approval, announce_pending_approval, pending_response, _snapshot_template,
