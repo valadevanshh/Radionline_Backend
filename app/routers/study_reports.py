@@ -712,12 +712,61 @@ async def sign_study_report(
     case, study = resolve_case_and_study(db, case_id, study_id)
     doctor_may_edit_study(db, current_user, study)
     already_signed = study_report_status(study) == "SIGNED"
-    # Doctors edit drafts only; a signed study stays locked even in a partially completed case.
-    if current_user.role == "DOCTOR" and (already_signed or (case.status or "") == "Completed"):
-        raise HTTPException(
-            status_code=403,
-            detail="This study report is already signed and is read-only (only Super Admin can edit).",
+    if current_user.role == "CENTER":
+        raise HTTPException(status_code=403, detail="Centre logins cannot edit reports")
+    # A signed study stays signed. Doctor and Super Admin may correct the text;
+    # the original signer, billing, and public link are left as they are.
+    if already_signed and current_user.role in ("DOCTOR", "SUPER_ADMIN"):
+        if not ((payload.findings and str(payload.findings).strip()) or (payload.impression and str(payload.impression).strip())):
+            raise HTTPException(status_code=400, detail="Findings or impression required")
+        apply_study_payload(study, payload)
+        studies = case_studies_ordered(db, case.id)
+        sync_case_report_maps(db, case, studies)
+        try:
+            from app.models import ReportCommentDB
+        except ImportError:
+            from app.models import ReportCommentDB
+        who = current_user.name or "User"
+        db.add(ReportCommentDB(
+            case_id=case.id,
+            study_id=study.id,
+            author_user_id=current_user.id,
+            author_role=current_user.role,
+            author_name=who,
+            kind="EDIT",
+            body=f"Report updated ({study.body_part}).",
+            created_at=datetime.utcnow().isoformat() + "Z",
+        ))
+        db.commit()
+        try:
+            from app.notifications import notify_report_updated
+        except ImportError:
+            from app.notifications import notify_report_updated
+        try:
+            await notify_report_updated(db, case, current_user, study.body_part or "")
+        except Exception:
+            logger.exception("report update notification failed")
+        report = db.query(ReportDB).filter(ReportDB.id == case.id).first()
+        out_report = enrich_case_item(
+            db_to_schema(report) if report else study_to_schema(study, case),
+            case,
+            studies,
         )
+        signed, total = signed_count(studies)
+        return {
+            "ok": True,
+            "updated": True,
+            "toast": f"{study.body_part} report updated.",
+            "studyId": study.id,
+            "bodyPart": study.body_part,
+            "reportStatus": "SIGNED",
+            "alreadySigned": True,
+            "caseComplete": (case.status or "") == "Completed",
+            "signedStudyCount": signed,
+            "studyCount": total,
+            "pendingStudyCount": max(0, total - signed),
+            "report": out_report,
+        }
     apply_study_payload(study, payload)
     if not (study.findings and str(study.findings).strip()) and not (
         study.impression and str(study.impression).strip()

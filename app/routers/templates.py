@@ -223,8 +223,8 @@ async def save_template(
 ):
     """Create / edit a template.
     - DOCTOR: own templates only.
-    - SUPER_ADMIN: on behalf of any doctor (doctorId required), saved directly.
-    - MANAGER (needs Doctors → write): on behalf of a doctor, staged for Super Admin approval (HTTP 202)."""
+    - SUPER_ADMIN: for one doctor or all doctors (no doctorId), saved directly.
+    - MANAGER (needs Doctors → write): same, staged for Super Admin approval (HTTP 202)."""
     role = current_user.role
     if role == "DOCTOR":
         return save_template_core(tmpl_in, db, current_user)
@@ -241,9 +241,17 @@ async def save_template(
         raise HTTPException(status_code=422, detail="Template name is required")
     if not (tmpl_in.modality or "").strip():
         raise HTTPException(status_code=422, detail="Modality is required")
-    doc_id, doc_name = _resolve_doctor(db, tmpl_in.doctorId)
-    tmpl_in.doctorId = doc_id
-    tmpl_in.doctorName = doc_name
+    audience = (tmpl_in.doctorId or "").strip()
+    if audience.upper() == "ALL":
+        audience = ""
+    if audience:
+        doc_id, doc_name = _resolve_doctor(db, audience)
+        tmpl_in.doctorId = doc_id
+        tmpl_in.doctorName = doc_name
+    else:
+        tmpl_in.doctorId = None
+        tmpl_in.doctorName = None
+        doc_name = "all doctors"
 
     exists = bool(tmpl_in.id) and db.query(TemplateDB).filter(TemplateDB.id == tmpl_in.id).first() is not None
     if tmpl_in.id and not exists:
@@ -284,9 +292,9 @@ def save_template_core(
         doc = db.query(DoctorDB).filter(DoctorDB.id == creator_doctor_id).first() if creator_doctor_id else None
         doc_name = (getattr(doc, "full_name", None) or getattr(doc, "name", None)) if doc else None
         creator_doctor_name = doc_name or (current_user.name or current_user.email)
-    elif tmpl_in.doctorId:
-        creator_doctor_id = tmpl_in.doctorId
-        creator_doctor_name = tmpl_in.doctorName
+    elif current_user is None or current_user.role != "DOCTOR":
+        creator_doctor_id = tmpl_in.doctorId or None
+        creator_doctor_name = tmpl_in.doctorName if tmpl_in.doctorId else None
 
     if existing:
         # Check permissions if doctor is updating
@@ -305,9 +313,11 @@ def save_template_core(
         existing.modality = tmpl_in.modality
         # Admin / approval path may (re)assign the owning doctor; a doctor only claims unowned rows
         on_behalf = not current_user or current_user.role != "DOCTOR"
-        if creator_doctor_id and (on_behalf or not getattr(existing, "doctor_id", None)):
+        if on_behalf:
             existing.doctor_id = creator_doctor_id
-        if creator_doctor_name and (on_behalf or not getattr(existing, "doctor_name", None)):
+            existing.doctor_name = creator_doctor_name
+        elif creator_doctor_id and not getattr(existing, "doctor_id", None):
+            existing.doctor_id = creator_doctor_id
             existing.doctor_name = creator_doctor_name
 
         meta_payload = {

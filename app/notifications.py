@@ -212,6 +212,25 @@ async def notify_case_reassigned(
     )
 
 
+async def notify_report_updated(db: Session, case: CaseDB, actor: UserDB, body_part: str) -> List[dict]:
+    """Tell the centre and every Super Admin that a signed report was edited."""
+    who = actor.name or "Someone"
+    part = (body_part or "study").strip()
+    recipients = center_user_ids(db, case.radiology_center_id) + super_admin_user_ids(db)
+    if actor.id in recipients:
+        recipients = [i for i in recipients if i != actor.id]
+    return await notify(
+        db,
+        recipients,
+        kind="REPORT_UPDATED",
+        title=f"Report updated: {case_label(case)}",
+        body=f"{who} updated the {part} report.",
+        case_id=case.id,
+        link=case_link(case.id, activity=True),
+        actor=actor,
+    )
+
+
 async def notify_case_message(
     db: Session, case: CaseDB, doctor_refs: Iterable[str], actor: UserDB, text: str
 ) -> List[dict]:
