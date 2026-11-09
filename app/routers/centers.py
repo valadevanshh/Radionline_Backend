@@ -1,3 +1,4 @@
+from app.profile_documents import ProfileDocument, public_documents, prepare_documents, store_documents
 import time
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
@@ -44,6 +45,7 @@ def db_to_schema(c: CenterDB) -> dict:
         "address": meta.get("address"),
         "headerTemplateUrl": file_storage.public_url(meta.get("headerTemplateUrl")),
         "letterheadMode": meta.get("letterheadMode", "full-page"),
+        "documents": public_documents(meta.get("documents")),
         "logoUrl": file_storage.public_url(meta.get("logoUrl")),
         "createdAt": c.created_at,
         "frozenAt": getattr(c, "frozen_at", None),
@@ -76,6 +78,7 @@ class CenterProfileUpdate(BaseModel):
     headerTemplateUrl: Optional[str] = None
     letterheadMode: Optional[str] = None
     logoUrl: Optional[str] = None
+    documents: Optional[list[ProfileDocument]] = None
 
 
 @router.put("/{center_id}/profile", response_model=CenterResponse)
@@ -94,6 +97,7 @@ def update_center_profile(
     if not c:
         raise HTTPException(status_code=404, detail="Center not found")
     meta = dict(c.metadata_ or {})
+    documents = prepare_documents(body.documents, meta.get("documents")) if body.documents is not None else None
     if body.centerName is not None:
         name = " ".join(body.centerName.split())
         if not name:
@@ -119,6 +123,8 @@ def update_center_profile(
             body.logoUrl, category="centers", entity_id=center_id,
             subfolder="logo", filename_hint="logo.png",
         ) if body.logoUrl else None
+    if documents is not None:
+        meta["documents"] = store_documents(documents, "centers", center_id)
     c.metadata_ = meta
     flag_modified(c, "metadata_")
     db.commit()
@@ -235,6 +241,7 @@ def save_center_core(center_in: CenterCreate, db: Session) -> dict:
     c_id = center_in.id or f"center-{int(time.time() * 1000)}"
     existing = db.query(CenterDB).filter(CenterDB.id == c_id).first()
 
+    documents = prepare_documents(center_in.documents, (existing.metadata_ or {}).get("documents") if existing else None) if center_in.documents is not None else None
     hashed_pw = None
     if center_in.password:
         hashed_pw = center_in.password if looks_like_bcrypt(center_in.password) else hash_password(center_in.password)
@@ -260,6 +267,9 @@ def save_center_core(center_in: CenterCreate, db: Session) -> dict:
             filename_hint="logo.png",
         ),
     }
+
+    if documents is not None:
+        meta_payload["documents"] = store_documents(documents, "centers", c_id)
 
     if existing:
         existing.center_name = center_in.centerName

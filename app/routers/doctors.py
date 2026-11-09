@@ -1,3 +1,4 @@
+from app.profile_documents import ProfileDocument, public_documents, prepare_documents, store_documents
 import base64
 import re
 import time
@@ -6,7 +7,7 @@ from datetime import datetime
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from app.names import clean_dr, strip_dr
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 try:
     from app.database import get_db
@@ -45,6 +46,7 @@ def db_to_schema(d: DoctorDB) -> dict:
         "contactNumber": d.contact_number,
         "address": meta.get("address"),
         "signatureUrl": file_storage.public_url(meta.get("signatureUrl")),
+        "signatureScale": meta.get("signatureScale", 100),
         "profileFileUrl": file_storage.public_url(meta.get("profileFileUrl")),
         "degree": meta.get("degree", "M.D. (Radiodiagnosis)"),
         "registrationNumber": meta.get("registrationNumber"),
@@ -52,6 +54,7 @@ def db_to_schema(d: DoctorDB) -> dict:
         "photoUrl": file_storage.public_url(meta.get("photoUrl")),
         "yearsOfExperience": _stored_years(meta.get("yearsOfExperience")),
         "expertise": _stored_expertise(meta.get("expertise")),
+        "certificates": public_documents(meta.get("certificates")),
         "cvUrl": file_storage.public_url(meta.get("cvUrl")),
         "cvFileName": (meta.get("cvFileName") or "CV") if meta.get("cvUrl") else None,
         "frozenAt": getattr(d, "frozen_at", None),
@@ -134,6 +137,7 @@ def save_doctor_core(doc_in: DoctorCreate, db: Session) -> dict:
     doc_id = doc_in.id or f"doc-{int(time.time() * 1000)}"
     existing = db.query(DoctorDB).filter(DoctorDB.id == doc_id).first()
 
+    certificates = prepare_documents(doc_in.certificates, (existing.metadata_ or {}).get("certificates")) if existing and doc_in.certificates is not None else (prepare_documents(doc_in.certificates) if doc_in.certificates is not None else None)
     hashed_pw = None
     if doc_in.password:
         hashed_pw = doc_in.password if looks_like_bcrypt(doc_in.password) else hash_password(doc_in.password)
@@ -166,6 +170,9 @@ def save_doctor_core(doc_in: DoctorCreate, db: Session) -> dict:
         cv_url=doc_in.cvUrl,
         cv_file_name=doc_in.cvFileName,
     )
+
+    if certificates is not None:
+        meta_payload["certificates"] = store_documents(certificates, "doctors", doc_id)
 
     if existing:
         existing.first_name = doc_in.firstName
@@ -402,23 +409,28 @@ class DoctorProfileUpdate(BaseModel):
     registrationNumber: Optional[str] = None
     # data: URL = new upload; "" = remove; any other value = keep the current image
     signatureUrl: Optional[str] = None
+    signatureScale: Optional[int] = Field(default=None, ge=25, le=200)
     photoUrl: Optional[str] = None
     # sent (number or null) = set / clear; omitted = keep
     yearsOfExperience: Optional[int] = None
     expertise: Optional[list[str]] = None
     cvUrl: Optional[str] = None
     cvFileName: Optional[str] = None
+    certificates: Optional[list[ProfileDocument]] = None
 
 
 def _apply_profile_update(db: Session, doc: DoctorDB, body: DoctorProfileUpdate) -> dict:
     meta = dict(doc.metadata_ or {})
     fields_set = getattr(body, "model_fields_set", None) or getattr(body, "__fields_set__", set())
+    certificates = prepare_documents(body.certificates, meta.get("certificates")) if body.certificates is not None else None
     # Validate everything first so a bad field never leaves a half-saved upload behind.
     if "yearsOfExperience" in fields_set:
         years = body.yearsOfExperience
         if years is not None and not (0 <= years <= MAX_YEARS_OF_EXPERIENCE):
             raise HTTPException(status_code=400, detail=f"Years of experience must be between 0 and {MAX_YEARS_OF_EXPERIENCE}")
         meta["yearsOfExperience"] = years
+    if body.signatureScale is not None:
+        meta["signatureScale"] = body.signatureScale
     if body.expertise is not None:
         meta["expertise"] = _clean_expertise(body.expertise)
     photo_raw = (body.photoUrl or "").strip() if body.photoUrl is not None else None
@@ -485,6 +497,8 @@ def _apply_profile_update(db: Session, doc: DoctorDB, body: DoctorProfileUpdate)
                 subfolder="signature",
                 filename_hint=signature_filename_hint(),
             )
+    if certificates is not None:
+        meta["certificates"] = store_documents(certificates, "doctors", doc.id)
     doc.metadata_ = meta
     flag_modified(doc, "metadata_")
     db.commit()

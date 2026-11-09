@@ -1,3 +1,4 @@
+from app.profile_documents import ProfileDocument
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 
@@ -47,6 +48,7 @@ class DoctorBase(BaseModel):
     contactNumber: str
     address: Optional[str] = None
     signatureUrl: Optional[str] = None
+    signatureScale: int = 100
     profileFileUrl: Optional[str] = None
     degree: Optional[str] = "M.D. (Radiodiagnosis)"
     registrationNumber: Optional[str] = None
@@ -55,6 +57,7 @@ class DoctorBase(BaseModel):
     expertise: Optional[List[str]] = None
     cvUrl: Optional[str] = None
     cvFileName: Optional[str] = None
+    certificates: Optional[List[ProfileDocument]] = None
 
 class DoctorCreate(DoctorBase):
     id: Optional[str] = None
@@ -81,6 +84,7 @@ class CenterBase(BaseModel):
     headerTemplateUrl: Optional[str] = None
     letterheadMode: Optional[str] = None
     logoUrl: Optional[str] = None
+    documents: Optional[List[ProfileDocument]] = None
 
 class CenterCreate(CenterBase):
     id: Optional[str] = None

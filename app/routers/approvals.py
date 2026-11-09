@@ -1,3 +1,4 @@
+from app.profile_documents import prepare_documents, store_documents
 import time
 import uuid
 from datetime import datetime
@@ -134,6 +135,7 @@ def _snapshot_doctor(doc_id: str, db: Session) -> Optional[dict]:
         "expertise": meta.get("expertise") or [],
         "cvUrl": meta.get("cvUrl"),
         "cvFileName": meta.get("cvFileName"),
+        "certificates": meta.get("certificates") or [],
         "createdAt": d.created_at,
         # password intentionally omitted from before snapshot
     }
@@ -156,6 +158,7 @@ def _snapshot_center(center_id: str, db: Session) -> Optional[dict]:
         "headerTemplateUrl": meta.get("headerTemplateUrl"),
         "letterheadMode": meta.get("letterheadMode", "full-page"),
         "logoUrl": meta.get("logoUrl"),
+        "documents": meta.get("documents") or [],
         "createdAt": c.created_at,
     }
 
@@ -937,6 +940,10 @@ def _apply_doctor_action(action_type: str, entity_id: Optional[str], p: dict, db
     )
     now_str = datetime.utcnow().strftime("%Y-%m-%d")
 
+    if p.get("certificates") is not None:
+        prepared = prepare_documents(p["certificates"], (doc.metadata_ or {}).get("certificates") if doc else None)
+        meta["certificates"] = store_documents(prepared, "doctors", doc_id)
+
     if doc:
         doc.first_name = p.get("firstName", doc.first_name)
         doc.last_name = p.get("lastName", doc.last_name)
@@ -1021,6 +1028,11 @@ def _apply_center_action(action_type: str, entity_id: Optional[str], p: dict, db
             filename_hint="logo.png",
         ),
     }
+    if p.get("documents") is not None:
+        prepared = prepare_documents(p["documents"], (c.metadata_ or {}).get("documents") if c else None)
+        meta["documents"] = store_documents(prepared, "centers", center_id)
+    if c:
+        meta = {**(c.metadata_ or {}), **{key: value for key, value in meta.items() if value is not None}}
     now_str = datetime.utcnow().strftime("%Y-%m-%d")
 
     if c:

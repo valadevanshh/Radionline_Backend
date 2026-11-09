@@ -75,7 +75,11 @@ def get_public_report(token: str, response: Response, db: Session = Depends(get_
         },
         "patient": {
             "name": case.full_name,
-            "patientId": case.patient_number,
+            # Match the report's centre ID, including legacy rows stored only on the case.
+            # A missing centre ID must never fall back to the internal patient number.
+            "patientId": str(rmeta.get("centerPatientId") or "").strip()
+            or str(cmeta.get("centerPatientId") or "").strip()
+            or "\u2014",
             "age": case.age,
             "ageUnit": cmeta.get("ageUnit") or rmeta.get("ageUnit") or "Years",
             "gender": case.gender,

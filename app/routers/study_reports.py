@@ -65,6 +65,7 @@ def build_signer_snapshot(doc, doctor_id, doctor_name: str, signed_at: str) -> d
         "degree": (str(meta.get("degree") or "").strip() or None),
         "registrationNumber": (str(meta.get("registrationNumber") or "").strip() or None),
         "signaturePath": usable_signature_path(meta.get("signatureUrl")),
+        "signatureScale": meta.get("signatureScale", 100),
         "signedAt": signed_at,
     }
 
@@ -79,6 +80,7 @@ def signer_public(study) -> Optional[dict]:
     if not isinstance(snap, dict):
         return None
     out = {k: snap.get(k) for k in ("doctorId", "name", "degree", "registrationNumber", "signedAt")}
+    out["signatureScale"] = snap.get("signatureScale", 100)
     out["signatureUrl"] = file_storage.public_url(snap.get("signaturePath")) if snap.get("signaturePath") else None
     return out
 
@@ -352,6 +354,7 @@ def enrich_case_item(item: dict, case: CaseDB, studies: list) -> dict:
             "impression": s.impression,
             "technique": getattr(s, "technique", None),
             "templateId": getattr(s, "template_id", None),
+            "title": (s.metadata_ or {}).get("title"),
             "signedAt": getattr(s, "signed_at", None),
             "reportDate": study_report_date(s),
             "signedBy": getattr(s, "signed_by", None),
@@ -440,6 +443,10 @@ def apply_study_payload(study: StudyDB, payload: StudyReportPayload) -> None:
         study.clinical_notes = payload.clinicalNotes
     if payload.docContent is not None:
         study.doc_content = payload.docContent
+    if payload.title is not None and payload.title.strip():
+        meta = dict(study.metadata_ or {})
+        meta["title"] = payload.title.strip()[:200]
+        study.metadata_ = meta
     if payload.reportDate:
         meta = dict(study.metadata_ or {})
         meta["reportDate"] = _clean_report_date(payload.reportDate)
@@ -659,6 +666,8 @@ async def save_study_draft(
 ):
     case, study = resolve_case_and_study(db, case_id, study_id)
     doctor_may_edit_study(db, current_user, study)
+    if current_user.role == "DOCTOR" and (case.status or "") == "Completed":
+        raise HTTPException(status_code=403, detail="Completed reports are read-only")
     if study_report_status(study) == "SIGNED":
         raise HTTPException(status_code=409, detail="Study already signed")
     apply_study_payload(study, payload)
@@ -703,11 +712,11 @@ async def sign_study_report(
     case, study = resolve_case_and_study(db, case_id, study_id)
     doctor_may_edit_study(db, current_user, study)
     already_signed = study_report_status(study) == "SIGNED"
-    # t81: once the case is Completed a doctor cannot change (re-sign) a signed report; Super Admin can.
-    if already_signed and current_user.role == "DOCTOR" and (case.status or "") == "Completed":
+    # Doctors edit drafts only; a signed study stays locked even in a partially completed case.
+    if current_user.role == "DOCTOR" and (already_signed or (case.status or "") == "Completed"):
         raise HTTPException(
             status_code=403,
-            detail="This report is completed and can no longer be edited (only Super Admin can).",
+            detail="This study report is already signed and is read-only (only Super Admin can edit).",
         )
     apply_study_payload(study, payload)
     if not (study.findings and str(study.findings).strip()) and not (
