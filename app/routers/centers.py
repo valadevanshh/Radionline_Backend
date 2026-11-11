@@ -6,12 +6,12 @@ from sqlalchemy.orm import Session
 try:
     from app.database import get_db
     from app.models import CenterDB, UserDB
-    from app.schemas import CenterCreate, CenterResponse, CenterReportLayout
+    from app.schemas import CenterCreate, CenterResponse, CenterReportLayout, CenterLetterhead
     from app.security import get_current_user, require_roles, hash_password, looks_like_bcrypt
 except ImportError:
     from app.database import get_db
     from app.models import CenterDB, UserDB
-    from app.schemas import CenterCreate, CenterResponse, CenterReportLayout
+    from app.schemas import CenterCreate, CenterResponse, CenterReportLayout, CenterLetterhead
     from app.security import get_current_user, require_roles, hash_password, looks_like_bcrypt
 from sqlalchemy.orm.attributes import flag_modified
 from typing import Optional
@@ -45,6 +45,10 @@ def db_to_schema(c: CenterDB) -> dict:
         "address": meta.get("address"),
         "headerTemplateUrl": file_storage.public_url(meta.get("headerTemplateUrl")),
         "letterheadMode": meta.get("letterheadMode", "full-page"),
+        "letterheads": [
+            {**item, "url": file_storage.public_url(item.get("url"))}
+            for item in (meta.get("letterheads") or []) if isinstance(item, dict)
+        ],
         "reportLayout": meta.get("reportLayout"),
         "documents": public_documents(meta.get("documents")),
         "logoUrl": file_storage.public_url(meta.get("logoUrl")),
@@ -78,6 +82,7 @@ class CenterProfileUpdate(BaseModel):
     address: Optional[str] = None
     headerTemplateUrl: Optional[str] = None
     letterheadMode: Optional[str] = None
+    letterheads: Optional[list[CenterLetterhead]] = None
     reportLayout: Optional[CenterReportLayout] = None
     logoUrl: Optional[str] = None
     documents: Optional[list[ProfileDocument]] = None
@@ -120,6 +125,27 @@ def update_center_profile(
         if body.letterheadMode not in ("header", "footer", "full-page", "preprinted"):
             raise HTTPException(status_code=400, detail="Invalid letterhead placement")
         meta["letterheadMode"] = body.letterheadMode
+    if body.letterheads is not None:
+        seen_names = set()
+        saved_letterheads = []
+        for item in body.letterheads:
+            name = item.name.strip()
+            if not name:
+                raise HTTPException(status_code=400, detail="Every letterhead needs a name")
+            key = name.casefold()
+            if key in seen_names:
+                raise HTTPException(status_code=400, detail="Letterhead names must be unique for this center")
+            seen_names.add(key)
+            saved_letterheads.append({
+                "id": item.id,
+                "name": name,
+                "url": file_storage.materialize_media_reference(
+                    item.url, category="centers", entity_id=center_id,
+                    subfolder=f"letterheads/{item.id}", filename_hint="letterhead.png",
+                ),
+                "letterheadMode": item.letterheadMode,
+            })
+        meta["letterheads"] = saved_letterheads
     if body.reportLayout is not None:
         meta["reportLayout"] = body.reportLayout.model_dump()
     if body.logoUrl is not None:
@@ -263,6 +289,16 @@ def save_center_core(center_in: CenterCreate, db: Session) -> dict:
             filename_hint="header.png",
         ),
         "letterheadMode": center_in.letterheadMode or "full-page",
+        "letterheads": [
+            {
+                **item.model_dump(),
+                "url": file_storage.materialize_media_reference(
+                    item.url, category="centers", entity_id=c_id,
+                    subfolder=f"letterheads/{item.id}", filename_hint="letterhead.png",
+                ),
+            }
+            for item in center_in.letterheads or []
+        ] if center_in.letterheads is not None else None,
         "reportLayout": center_in.reportLayout.model_dump() if center_in.reportLayout is not None else None,
         "logoUrl": file_storage.materialize_media_reference(
             center_in.logoUrl,

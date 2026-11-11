@@ -85,6 +85,13 @@ class CenterReportLayout(BaseModel):
         return self
 
 
+class CenterLetterhead(BaseModel):
+    id: str
+    name: str
+    url: str
+    letterheadMode: Literal["header", "footer", "full-page", "preprinted"] = "full-page"
+
+
 class CenterBase(BaseModel):
     centerName: str
     firstName: Optional[str] = None
@@ -96,9 +103,17 @@ class CenterBase(BaseModel):
     address: Optional[str] = None
     headerTemplateUrl: Optional[str] = None
     letterheadMode: Optional[str] = None
+    letterheads: Optional[List[CenterLetterhead]] = None
     reportLayout: Optional[CenterReportLayout] = None
     logoUrl: Optional[str] = None
     documents: Optional[List[ProfileDocument]] = None
+
+    @model_validator(mode="after")
+    def unique_letterhead_names(self):
+        names = [item.name.strip().casefold() for item in (self.letterheads or [])]
+        if len(names) != len(set(names)):
+            raise ValueError("Letterhead names must be unique for this center")
+        return self
 
 class CenterCreate(CenterBase):
     id: Optional[str] = None

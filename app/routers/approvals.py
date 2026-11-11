@@ -157,6 +157,7 @@ def _snapshot_center(center_id: str, db: Session) -> Optional[dict]:
         "address": meta.get("address"),
         "headerTemplateUrl": meta.get("headerTemplateUrl"),
         "letterheadMode": meta.get("letterheadMode", "full-page"),
+        "letterheads": meta.get("letterheads") or [],
         "reportLayout": meta.get("reportLayout"),
         "logoUrl": meta.get("logoUrl"),
         "documents": meta.get("documents") or [],
@@ -1021,6 +1022,17 @@ def _apply_center_action(action_type: str, entity_id: Optional[str], p: dict, db
             subfolder="header",
             filename_hint="header.png",
         ),
+        "letterheadMode": p.get("letterheadMode") or "full-page",
+        "letterheads": [
+            {
+                **item,
+                "url": file_storage.materialize_media_reference(
+                    item.get("url"), category="centers", entity_id=center_id,
+                    subfolder=f"letterheads/{item.get('id')}", filename_hint="letterhead.png",
+                ),
+            }
+            for item in (p.get("letterheads") or []) if isinstance(item, dict)
+        ] if p.get("letterheads") is not None else None,
         "logoUrl": file_storage.materialize_media_reference(
             p.get("logoUrl"),
             category="centers",
