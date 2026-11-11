@@ -157,6 +157,7 @@ def _snapshot_center(center_id: str, db: Session) -> Optional[dict]:
         "address": meta.get("address"),
         "headerTemplateUrl": meta.get("headerTemplateUrl"),
         "letterheadMode": meta.get("letterheadMode", "full-page"),
+        "reportLayout": meta.get("reportLayout"),
         "logoUrl": meta.get("logoUrl"),
         "documents": meta.get("documents") or [],
         "createdAt": c.created_at,
@@ -1027,6 +1028,7 @@ def _apply_center_action(action_type: str, entity_id: Optional[str], p: dict, db
             subfolder="logo",
             filename_hint="logo.png",
         ),
+        "reportLayout": p.get("reportLayout"),
     }
     if p.get("documents") is not None:
         prepared = prepare_documents(p["documents"], (c.metadata_ or {}).get("documents") if c else None)

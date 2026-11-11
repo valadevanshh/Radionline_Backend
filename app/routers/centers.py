@@ -6,12 +6,12 @@ from sqlalchemy.orm import Session
 try:
     from app.database import get_db
     from app.models import CenterDB, UserDB
-    from app.schemas import CenterCreate, CenterResponse
+    from app.schemas import CenterCreate, CenterResponse, CenterReportLayout
     from app.security import get_current_user, require_roles, hash_password, looks_like_bcrypt
 except ImportError:
     from app.database import get_db
     from app.models import CenterDB, UserDB
-    from app.schemas import CenterCreate, CenterResponse
+    from app.schemas import CenterCreate, CenterResponse, CenterReportLayout
     from app.security import get_current_user, require_roles, hash_password, looks_like_bcrypt
 from sqlalchemy.orm.attributes import flag_modified
 from typing import Optional
@@ -45,6 +45,7 @@ def db_to_schema(c: CenterDB) -> dict:
         "address": meta.get("address"),
         "headerTemplateUrl": file_storage.public_url(meta.get("headerTemplateUrl")),
         "letterheadMode": meta.get("letterheadMode", "full-page"),
+        "reportLayout": meta.get("reportLayout"),
         "documents": public_documents(meta.get("documents")),
         "logoUrl": file_storage.public_url(meta.get("logoUrl")),
         "createdAt": c.created_at,
@@ -77,6 +78,7 @@ class CenterProfileUpdate(BaseModel):
     address: Optional[str] = None
     headerTemplateUrl: Optional[str] = None
     letterheadMode: Optional[str] = None
+    reportLayout: Optional[CenterReportLayout] = None
     logoUrl: Optional[str] = None
     documents: Optional[list[ProfileDocument]] = None
 
@@ -118,6 +120,8 @@ def update_center_profile(
         if body.letterheadMode not in ("header", "footer", "full-page", "preprinted"):
             raise HTTPException(status_code=400, detail="Invalid letterhead placement")
         meta["letterheadMode"] = body.letterheadMode
+    if body.reportLayout is not None:
+        meta["reportLayout"] = body.reportLayout.model_dump()
     if body.logoUrl is not None:
         meta["logoUrl"] = file_storage.materialize_media_reference(
             body.logoUrl, category="centers", entity_id=center_id,
@@ -259,6 +263,7 @@ def save_center_core(center_in: CenterCreate, db: Session) -> dict:
             filename_hint="header.png",
         ),
         "letterheadMode": center_in.letterheadMode or "full-page",
+        "reportLayout": center_in.reportLayout.model_dump() if center_in.reportLayout is not None else None,
         "logoUrl": file_storage.materialize_media_reference(
             center_in.logoUrl,
             category="centers",

@@ -1,6 +1,6 @@
 from app.profile_documents import ProfileDocument
-from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
+from pydantic import BaseModel, Field, model_validator
+from typing import List, Optional, Dict, Any, Literal
 
 # User Account Schemas
 class UserBase(BaseModel):
@@ -72,6 +72,19 @@ class DoctorResponse(DoctorBase):
         from_attributes = True
 
 # Radiology Center Schemas
+class CenterReportLayout(BaseModel):
+    headerHeightMm: int = Field(ge=8, le=100)
+    footerHeightMm: int = Field(ge=8, le=70)
+    qrPosition: Literal["left", "right"] = "right"
+    doctorDetailsPosition: Literal["left", "center", "right"] = "left"
+
+    @model_validator(mode="after")
+    def keep_report_body_usable(self):
+        if self.headerHeightMm + self.footerHeightMm > 220:
+            raise ValueError("Header and footer space must leave at least 77 mm for report content")
+        return self
+
+
 class CenterBase(BaseModel):
     centerName: str
     firstName: Optional[str] = None
@@ -83,6 +96,7 @@ class CenterBase(BaseModel):
     address: Optional[str] = None
     headerTemplateUrl: Optional[str] = None
     letterheadMode: Optional[str] = None
+    reportLayout: Optional[CenterReportLayout] = None
     logoUrl: Optional[str] = None
     documents: Optional[List[ProfileDocument]] = None
 
